@@ -368,8 +368,4 @@ public:
 
 private:
 	std::shared_ptr<KdCollider::CapsuleInfo> m_shape;
-
-//	Math::Vector3 m_localPos = Math::Vector3::Zero;
-//	float m_radius = 0.0f;
-//	float m_height = 0.0f;
 };
