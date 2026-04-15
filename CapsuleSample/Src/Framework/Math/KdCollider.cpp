@@ -831,10 +831,10 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingBox& target, const Math::
 }
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // BOXvsBOX(OBB)の当たり判定
-// 判定回数は 1 回　計算自体も軽く最も軽量な当たり判定　計算回数も固定なので処理効率は安定
-// 片方の球の判定を0にすれば単純な距離判定も作れる
+// 対象側が回転付きBOXなので、詳細リザルトが必要な時は
+// 登録側BOXも OBB に揃えて SAT で最小分離軸を求める
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-bool KdBoxCollision::Intersects(const DirectX::BoundingOrientedBox& target, const Math::Matrix& world, KdCollider::CollisionResult* /*pRes*/)
+bool KdBoxCollision::Intersects(const DirectX::BoundingOrientedBox& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
 {
 	if (!m_enable) { return false; }
 
@@ -846,8 +846,197 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingOrientedBox& target, cons
 
 	bool isHit = (!m_IsOriented) ? myAABBShape.Intersects(target) : myOBBShape.Intersects(target);
 
-	// 即結果を返す(HITしたかどうかだけが知れる)
-	return isHit;
+	// 詳細リザルトが必要無ければ即結果を返す
+	if (!pRes) { return isHit; }
+
+	// 当たっていないなら押し出し情報は不要
+	if (!isHit) { return false; }
+
+	// SAT(Separating Axis Theorem) で最小分離軸を求めるため、
+	// まずは登録側を OBB 形式へ揃える。
+	DirectX::BoundingOrientedBox myBox;
+	if (!m_IsOriented)
+	{
+		DirectX::BoundingOrientedBox::CreateFromBoundingBox(myBox, myAABBShape);
+	}
+	else
+	{
+		myBox = myOBBShape;
+	}
+
+	// 対象側はすでに OBB なのでそのまま使える
+	const DirectX::BoundingOrientedBox& targetBox = target;
+
+	// OBB のローカル軸をワールド空間へ変換する。
+	// この3軸を使って、面法線6本 + 外積軸9本の計15軸を調べる。
+	auto BuildBoxAxes = [](const DirectX::BoundingOrientedBox& box, Math::Vector3 outAxes[3])
+	{
+		Math::Vector4 quat = Math::Vector4(box.Orientation);
+		outAxes[0] = Math::Vector3(XMVector3Rotate(Math::Vector3(1.0f, 0.0f, 0.0f), quat));
+		outAxes[1] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 1.0f, 0.0f), quat));
+		outAxes[2] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 0.0f, 1.0f), quat));
+
+		outAxes[0].Normalize();
+		outAxes[1].Normalize();
+		outAxes[2].Normalize();
+	};
+
+	// 押し出し方向に対して各BOXの最前面点を取る補助計算。
+	// hitPos は接触面全体の厳密解ではなく、押し出しを説明しやすい代表点として返す。
+	auto GetSupportPoint = [](const DirectX::BoundingOrientedBox& box, const Math::Vector3 axes[3], const Math::Vector3& dir)
+	{
+		Math::Vector3 support = box.Center;
+		const float extents[3] = { box.Extents.x, box.Extents.y, box.Extents.z };
+
+		for (int i = 0; i < 3; i++)
+		{
+			float sign = (DirectX::XMVector3Dot(dir, axes[i]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
+			support += axes[i] * extents[i] * sign;
+		}
+
+		return support;
+	};
+
+	Math::Vector3 myAxes[3];
+	Math::Vector3 targetAxes[3];
+	BuildBoxAxes(myBox, myAxes);
+	BuildBoxAxes(targetBox, targetAxes);
+
+	const float myExtents[3] = { myBox.Extents.x, myBox.Extents.y, myBox.Extents.z };
+	const float targetExtents[3] = { targetBox.Extents.x, targetBox.Extents.y, targetBox.Extents.z };
+
+	Math::Vector3 centerDelta = Math::Vector3(targetBox.Center) - Math::Vector3(myBox.Center);
+
+	// 中心差を登録側BOXの軸へ投影しておくと、各分離軸の式を統一して書ける
+	float t[3] =
+	{
+		DirectX::XMVector3Dot(centerDelta, myAxes[0]).m128_f32[0],
+		DirectX::XMVector3Dot(centerDelta, myAxes[1]).m128_f32[0],
+		DirectX::XMVector3Dot(centerDelta, myAxes[2]).m128_f32[0]
+	};
+
+	float rot[3][3] = {};
+	float absRot[3][3] = {};
+	constexpr float kSatEpsilon = 0.0001f;
+
+	for (int i = 0; i < 3; i++)
+	{
+		for (int j = 0; j < 3; j++)
+		{
+			rot[i][j] = DirectX::XMVector3Dot(myAxes[i], targetAxes[j]).m128_f32[0];
+			absRot[i][j] = fabsf(rot[i][j]) + kSatEpsilon;
+		}
+	}
+
+	// 15本の分離軸候補の中から、最も浅い重なり量を持つ軸を選ぶ。
+	// これが相手BOXを最短で分離できる押し出し方向になる。
+	float minOverlap = FLT_MAX;
+	Math::Vector3 bestAxis = Math::Vector3::Zero;
+
+	auto UpdateBestAxis = [&](Math::Vector3 axis, float overlap)
+	{
+		if (overlap < 0.0f)
+		{
+			// DirectX の Intersects と数値誤差が出ても暴れにくいよう、
+			// ごく小さい負値だけは 0 扱いで続行する。
+			if (overlap < -kSatEpsilon) { return false; }
+			overlap = 0.0f;
+		}
+
+		if (axis.LengthSquared() <= kSatEpsilon)
+		{
+			return true;
+		}
+
+		axis.Normalize();
+
+		if (overlap < minOverlap)
+		{
+			minOverlap = overlap;
+			bestAxis = axis;
+		}
+
+		return true;
+	};
+
+	// 1. 登録側BOXの面法線3本を調べる
+	for (int i = 0; i < 3; i++)
+	{
+		float ra = myExtents[i];
+		float rb =
+			targetExtents[0] * absRot[i][0] +
+			targetExtents[1] * absRot[i][1] +
+			targetExtents[2] * absRot[i][2];
+
+		float dist = fabsf(t[i]);
+		float overlap = ra + rb - dist;
+		float sign = (t[i] >= 0.0f) ? 1.0f : -1.0f;
+
+		if (!UpdateBestAxis(myAxes[i] * sign, overlap)) { return false; }
+	}
+
+	// 2. 対象側BOXの面法線3本を調べる
+	for (int j = 0; j < 3; j++)
+	{
+		float ra =
+			myExtents[0] * absRot[0][j] +
+			myExtents[1] * absRot[1][j] +
+			myExtents[2] * absRot[2][j];
+		float rb = targetExtents[j];
+
+		float projectedCenter =
+			t[0] * rot[0][j] +
+			t[1] * rot[1][j] +
+			t[2] * rot[2][j];
+		float dist = fabsf(projectedCenter);
+		float overlap = ra + rb - dist;
+		float sign = (DirectX::XMVector3Dot(centerDelta, targetAxes[j]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
+
+		if (!UpdateBestAxis(targetAxes[j] * sign, overlap)) { return false; }
+	}
+
+	// 3. 辺同士が最初に当たるケースもあるため、外積でできる9本の軸も調べる
+	for (int i = 0; i < 3; i++)
+	{
+		for (int j = 0; j < 3; j++)
+		{
+			Math::Vector3 axis = myAxes[i].Cross(targetAxes[j]);
+			if (axis.LengthSquared() <= kSatEpsilon)
+			{
+				// ほぼ平行な軸同士の外積は有効な分離軸にならない
+				continue;
+			}
+
+			float ra =
+				myExtents[(i + 1) % 3] * absRot[(i + 2) % 3][j] +
+				myExtents[(i + 2) % 3] * absRot[(i + 1) % 3][j];
+			float rb =
+				targetExtents[(j + 1) % 3] * absRot[i][(j + 2) % 3] +
+				targetExtents[(j + 2) % 3] * absRot[i][(j + 1) % 3];
+
+			float dist = fabsf(
+				t[(i + 2) % 3] * rot[(i + 1) % 3][j] -
+				t[(i + 1) % 3] * rot[(i + 2) % 3][j]
+			);
+			float overlap = ra + rb - dist;
+			float sign = (DirectX::XMVector3Dot(centerDelta, axis).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
+
+			if (!UpdateBestAxis(axis * sign, overlap)) { return false; }
+		}
+	}
+
+	// 採用軸は「登録側BOX -> 対象BOX」の向きで返す。
+	// 呼び出し側はこの向きに overlapDistance ぶん動かすことで最短分離できる。
+	pRes->m_hitDir = NormalizeOrFallback(bestAxis, centerDelta, world.Right(), world.Up());
+	pRes->m_overlapDistance = minOverlap;
+
+	// 接触位置は、互いに向かい合うサポート点の中点を代表値として返す
+	Math::Vector3 mySupport = GetSupportPoint(myBox, myAxes, pRes->m_hitDir);
+	Math::Vector3 targetSupport = GetSupportPoint(targetBox, targetAxes, -pRes->m_hitDir);
+	pRes->m_hitPos = (mySupport + targetSupport) * 0.5f;
+	pRes->m_hitNDir = pRes->m_hitDir;
+
+	return true;
 }
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // BOXvsレイの当たり判定

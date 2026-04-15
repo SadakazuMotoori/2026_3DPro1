@@ -80,5 +80,5 @@ void SkinmeshMan::PreDraw()
 //	m_pDebugWire->AddDebugSphere(m_spSphere->Center, 0.5f);
 
 	// BOX(AABB)デバッグワイヤーの描画
-	m_pDebugWire->AddDebugBox(GetMatrix(), { 0.5f,0.5f ,0.5f }, { 0.0f,0.5f ,0.0f }, true);
+	m_pDebugWire->AddDebugBox(GetMatrix(), { 0.5f,0.5f ,0.5f }, { 0.0f,0.5f ,0.0f });
 }

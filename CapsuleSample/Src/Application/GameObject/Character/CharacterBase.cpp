@@ -190,7 +190,7 @@ void CharacterBase::UpdateCollision()
 	if (!m_IsPlayer) return;
 	// ----- ----- ----- ----- -----
 	// ①当たり判定(カプセル判定)用の情報作成
-	KdCollider::BoxInfo _boxInfo(KdCollider::TypeBump, GetMatrix(), { 0, 0.5f, 0 }, { 0.5f, 0.5f, 0.5f }, true);
+	KdCollider::BoxInfo _boxInfo(KdCollider::TypeBump, GetMatrix(), { 0, 0.5f, 0 }, { 0.5f, 0.5f, 0.5f }, false);
 
 	// ②HIT判定対象オブジェクトに総当たり
 	for (std::weak_ptr<KdGameObject> wpGameObj : m_wpHitObjectList)
