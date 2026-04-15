@@ -24,9 +24,9 @@ void Enemy01::Init()
 	//	m_pCollider->RegisterCollisionShape("Enemy", _info, KdCollider::TypeBump);
 
 		// BOX(AABB)登録
-	//	Math::Vector3 _center = GetPos() + Math::Vector3(0, 0.5f, 0);
-	//	DirectX::BoundingBox _boxInfo(_center, { 0.5f, 0.5f, 0.5f });
-	//	m_pCollider->RegisterCollisionShape("Enemy", _boxInfo, KdCollider::TypeBump);
+		Math::Vector3 _center = GetPos() + Math::Vector3(0, 0.5f, 0);
+		DirectX::BoundingBox _boxInfo(_center, { 0.5f, 0.5f, 0.5f });
+		m_pCollider->RegisterCollisionShape("Enemy", _boxInfo, KdCollider::TypeBump);
 
 		// BOX(OBB)登録
 	//	Math::Vector3 _center = GetPos() + Math::Vector3(0, 0.5f, 0);
@@ -57,7 +57,7 @@ void Enemy01::PreDraw()
 //	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.7f,0 }, 1.5f, 0.3f);
 
 	// BOX(AABB)デバッグワイヤーの描画
-//	m_pDebugWire->AddDebugBox(GetMatrix(), {0.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f });
+	m_pDebugWire->AddDebugBox(GetMatrix(), {1.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f });
 
 	// BOX(OBB)デバッグワイヤーの描画
 //	Math::Matrix _mat = Math::Matrix::CreateRotationY(DirectX::XMConvertToRadians(45)) * Math::Matrix::CreateTranslation(GetPos());

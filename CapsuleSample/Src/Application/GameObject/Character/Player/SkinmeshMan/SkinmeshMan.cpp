@@ -73,6 +73,12 @@ void SkinmeshMan::DrawSprite()
 
 void SkinmeshMan::PreDraw()
 {
-	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.8f,0 }, 1.5f, 0.3f);
+	// カプセルデバッグワイヤーの描画
+//	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.8f,0 }, 1.5f, 0.3f);
+
+	// 球デバッグワイヤーの描画
 //	m_pDebugWire->AddDebugSphere(m_spSphere->Center, 0.5f);
+
+	// BOX(AABB)デバッグワイヤーの描画
+	m_pDebugWire->AddDebugBox(GetMatrix(), { 0.5f,0.5f ,0.5f }, { 0.0f,0.5f ,0.0f }, true);
 }

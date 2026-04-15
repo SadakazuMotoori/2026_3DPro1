@@ -161,6 +161,7 @@ void CharacterBase::UpdateCollision()
 		}
 	}
 */
+/*
 	// その他カプセルによる衝突判定
 	if (!m_IsPlayer) return;
 	// ----- ----- ----- ----- -----
@@ -175,6 +176,30 @@ void CharacterBase::UpdateCollision()
 		{
 			std::list<KdCollider::CollisionResult> retBumpList;
 			spGameObj->Intersects(_cpInfo, &retBumpList);
+
+			// ③ 結果を使って座標を補完する
+			for (auto& ret : retBumpList)
+			{
+				Math::Vector3 newPos = GetPos() + (ret.m_hitDir * ret.m_overlapDistance);
+				SetPos(newPos);
+			}
+		}
+	}
+*/
+	// その他BOXによる衝突判定
+	if (!m_IsPlayer) return;
+	// ----- ----- ----- ----- -----
+	// ①当たり判定(カプセル判定)用の情報作成
+	KdCollider::BoxInfo _boxInfo(KdCollider::TypeBump, GetMatrix(), { 0, 0.5f, 0 }, { 0.5f, 0.5f, 0.5f }, true);
+
+	// ②HIT判定対象オブジェクトに総当たり
+	for (std::weak_ptr<KdGameObject> wpGameObj : m_wpHitObjectList)
+	{
+		std::shared_ptr<KdGameObject> spGameObj = wpGameObj.lock();
+		if (spGameObj)
+		{
+			std::list<KdCollider::CollisionResult> retBumpList;
+			spGameObj->Intersects(_boxInfo, &retBumpList);
 
 			// ③ 結果を使って座標を補完する
 			for (auto& ret : retBumpList)
