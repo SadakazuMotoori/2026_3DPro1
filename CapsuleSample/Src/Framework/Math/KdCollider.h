@@ -140,9 +140,10 @@ public:
 		CapsuleInfo() {}
 
 		// pos と offset を個別指定したい既存コード向け
-		CapsuleInfo(UINT type, const Math::Vector3& offset, float height, float radius)
-			: m_type(type), m_offset(offset), m_height(height), m_radius(radius) {}
+		CapsuleInfo(UINT type, const Math::Vector3& pos, const Math::Vector3& offset, float height, float radius)
+			: m_type(type), m_pos(pos), m_offset(offset), m_height(height), m_radius(radius) {}
 
+		Math::Vector3	m_pos		= Math::Vector3::Zero;
 		Math::Vector3	m_offset	= Math::Vector3::Zero;
 		float			m_height	= 0.0f;
 		float			m_radius	= 0.0f;
@@ -169,9 +170,9 @@ public:
 	void RegisterCollisionShape(std::string_view name, const DirectX::BoundingBox& box, UINT type);
 	void RegisterCollisionShape(std::string_view name, const DirectX::BoundingOrientedBox& box, UINT type);
 	void RegisterCollisionShape(std::string_view name, const CapsuleInfo& capsule);
-	void RegisterCollisionShape(std::string_view name, const Math::Vector3& localPos, float radius, float height, UINT type)
+	void RegisterCollisionShape(std::string_view name, const Math::Vector3& pos, const Math::Vector3& localPos, float radius, float height, UINT type)
 	{
-		RegisterCollisionShape(name, CapsuleInfo(type, localPos, radius, height));
+		RegisterCollisionShape(name, CapsuleInfo(type, pos, localPos, radius, height));
 	}
 	void RegisterCollisionShape(std::string_view name, const std::shared_ptr<KdModelData>& model, UINT type);
 	void RegisterCollisionShape(std::string_view name, KdModelData* model, UINT type);

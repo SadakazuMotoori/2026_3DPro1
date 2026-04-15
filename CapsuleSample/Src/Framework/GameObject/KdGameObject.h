@@ -65,6 +65,7 @@ public:
 	bool Intersects(const KdCollider::SphereInfo& targetShape, std::list<KdCollider::CollisionResult>* pResults);
 	bool Intersects(const KdCollider::BoxInfo& targetBox, std::list<KdCollider::CollisionResult>* pResults);
 	bool Intersects(const KdCollider::RayInfo& targetShape, std::list<KdCollider::CollisionResult>* pResults);
+	bool Intersects(const KdCollider::CapsuleInfo& targetShape, std::list<KdCollider::CollisionResult>* pResults);
 
 protected:
 

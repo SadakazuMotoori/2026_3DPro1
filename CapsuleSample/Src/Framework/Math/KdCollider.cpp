@@ -520,9 +520,28 @@ bool KdSphereCollision::Intersects(const KdCollider::RayInfo& target, const Math
 bool KdSphereCollision::Intersects(const KdCollider::CapsuleInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
 {
 	if (!m_enable) { return false; }
-	bool isHit = false;
 
-	return isHit;
+	DirectX::BoundingSphere myShape;
+	m_shape.Transform(myShape, world);
+
+	// カプセル側の実装を使い、球vsカプセル向けに結果ベクトルだけ反転する
+	KdCapsuleCollision capsuleShape(target);
+
+	if (!pRes)
+	{
+		return capsuleShape.Intersects(myShape, Math::Matrix::Identity, nullptr);
+	}
+
+	KdCollider::CollisionResult tmpRes;
+	bool isHit = capsuleShape.Intersects(myShape, Math::Matrix::Identity, &tmpRes);
+	if (!isHit) { return false; }
+
+	pRes->m_hitPos = tmpRes.m_hitPos;
+	pRes->m_hitDir = tmpRes.m_hitDir * -1.0f;
+	pRes->m_hitNDir = tmpRes.m_hitNDir * -1.0f;
+	pRes->m_overlapDistance = tmpRes.m_overlapDistance;
+
+	return true;
 }
 
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
@@ -981,7 +1000,8 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingSphere& target, const
 	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
 	if (!m_enable || !m_shape) { return false; }
 
-	Math::Vector3 capsuleCenter = Math::Vector3::Transform(m_shape->m_offset, world);
+	Math::Vector3 pos			= m_shape->m_pos + m_shape->m_offset;
+	Math::Vector3 capsuleCenter = Math::Vector3::Transform(pos, world);
 	Math::Vector3 up = world.Up();
 	float upScale = up.Length();
 	if (upScale <= kCapsuleEpsilon)

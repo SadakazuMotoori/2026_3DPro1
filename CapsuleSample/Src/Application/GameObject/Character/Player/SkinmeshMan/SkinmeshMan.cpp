@@ -73,5 +73,6 @@ void SkinmeshMan::DrawSprite()
 
 void SkinmeshMan::PreDraw()
 {
-	m_pDebugWire->AddDebugSphere(m_spSphere->Center, 0.5f);
+	m_pDebugWire->AddDebugCapsule(GetMatrix(), 0.3f, 1.5f, { 0,0.8f,0 });
+//	m_pDebugWire->AddDebugSphere(m_spSphere->Center, 0.5f);
 }
