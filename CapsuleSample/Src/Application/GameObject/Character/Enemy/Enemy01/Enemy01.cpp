@@ -1,12 +1,5 @@
 ﻿#include "Enemy01.h"
 
-namespace
-{
-	constexpr float kEnemyCapsuleRadius = 0.3f;
-	constexpr float kEnemyCapsuleHeight = 1.5f;
-	const Math::Vector3 kEnemyCapsuleOffset = { 0.0f, 0.7f, 0.0f };
-}
-
 void Enemy01::Init()
 {
 	CharacterBase::Init();
@@ -16,8 +9,9 @@ void Enemy01::Init()
 		m_spModel = std::make_shared<KdModelWork>();
 		m_spModel->SetModelData("Asset/Models/Character/Robot/Robot.gltf");
 
-//		m_pCollider = std::make_unique<KdCollider>();
-//		m_pCollider->RegisterCollisionShape("Enemy", kEnemyCapsuleOffset, kEnemyCapsuleRadius, kEnemyCapsuleHeight, KdCollider::TypeBump);
+		m_pCollider = std::make_unique<KdCollider>();
+		KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
+		m_pCollider->RegisterCollisionShape("Enemy", _cpInfo);
 	}
 
 	SetPos({ 2, 0, 5 });

@@ -1,5 +1,58 @@
 ﻿#include "KdCollider.h"
 
+namespace
+{
+	constexpr float kCapsuleEpsilon = 0.0001f;
+
+	Math::Vector3 NormalizeOrFallback(Math::Vector3 dir, const Math::Vector3& fallback1, const Math::Vector3& fallback2, const Math::Vector3& fallback3)
+	{
+		if (dir.LengthSquared() > kCapsuleEpsilon)
+		{
+			dir.Normalize();
+			return dir;
+		}
+
+		dir = fallback1;
+		if (dir.LengthSquared() > kCapsuleEpsilon)
+		{
+			dir.Normalize();
+			return dir;
+		}
+
+		dir = fallback2;
+		if (dir.LengthSquared() > kCapsuleEpsilon)
+		{
+			dir.Normalize();
+			return dir;
+		}
+
+		dir = fallback3;
+		if (dir.LengthSquared() > kCapsuleEpsilon)
+		{
+			dir.Normalize();
+			return dir;
+		}
+
+		return Math::Vector3::Up;
+	}
+
+	Math::Vector3 ClosestPointOnSegment(const Math::Vector3& point, const Math::Vector3& start, const Math::Vector3& end)
+	{
+		Math::Vector3 segment = end - start;
+		float segmentLengthSqr = segment.LengthSquared();
+		if (segmentLengthSqr <= kCapsuleEpsilon)
+		{
+			return start;
+		}
+
+		float t = DirectX::XMVector3Dot(point - start, segment).m128_f32[0] / segmentLengthSqr;
+		if (t < 0.0f) { t = 0.0f; }
+		else if (t > 1.0f) { t = 1.0f; }
+
+		return start + segment * t;
+	}
+}
+
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
 // KdCollider
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
@@ -33,9 +86,9 @@ void KdCollider::RegisterCollisionShape(std::string_view name, const DirectX::Bo
 }
 
 ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-void KdCollider::RegisterCollisionShape(std::string_view name, const Math::Vector3& localPos, float radius, UINT type)
+void KdCollider::RegisterCollisionShape(std::string_view name, const CapsuleInfo& capsule)
 {
-	RegisterCollisionShape(name, std::make_unique<KdSphereCollision>(localPos, radius, type));
+	RegisterCollisionShape(name, std::make_unique<KdCapsuleCollision>(capsule));
 }
 
 ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -162,6 +215,39 @@ bool KdCollider::Intersects(const RayInfo& targetShape, const Math::Matrix& owne
 		return false;
 	}
 
+	bool isHit = false;
+
+	for (auto& collisionShape : m_collisionShapes)
+	{
+		// 用途が一致していない当たり判定形状はスキップ
+		if (!(targetShape.m_type & collisionShape.second->GetType())) { continue; }
+
+		KdCollider::CollisionResult tmpRes;
+		KdCollider::CollisionResult* pTmpRes = pResults ? &tmpRes : nullptr;
+
+		if (collisionShape.second->Intersects(targetShape, ownerMatrix, pTmpRes))
+		{
+			isHit = true;
+
+			// 詳細な衝突結果を必要としない場合は1つでも接触して返す
+			if (!pResults) { break; }
+
+			pResults->push_back(tmpRes);
+		}
+	}
+
+	return isHit;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// コライダーvsカプセルに登録された任意の形状の当たり判定
+// カプセルに合わせて何のために当たり判定をするのか type を渡す必要がある
+// 第3引数に詳細結果の受け取る機能が付いている
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdCollider::Intersects(const CapsuleInfo& targetShape, const Math::Matrix& ownerMatrix, std::list<KdCollider::CollisionResult>* pResults) const
+{
+	// 当たり判定無効のタイプの場合は返る
+	if (targetShape.m_type & m_disableType) { return false; }
 	bool isHit = false;
 
 	for (auto& collisionShape : m_collisionShapes)
@@ -427,6 +513,18 @@ bool KdSphereCollision::Intersects(const KdCollider::RayInfo& target, const Math
 	return isHit;
 }
 
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// 球vsカプセルの当たり判定
+// 判定回数は 1 回　計算回数が固定なので処理効率は安定
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdSphereCollision::Intersects(const KdCollider::CapsuleInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
+{
+	if (!m_enable) { return false; }
+	bool isHit = false;
+
+	return isHit;
+}
+
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
 // BOXCollision
 // BOXの形状
@@ -543,6 +641,11 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingOrientedBox& target, cons
 	// 即結果を返す(HITしたかどうかだけが知れる)
 	return isHit;
 }
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// BOXvsレイの当たり判定
+// 判定回数は 1 回　計算自体も軽く最も軽量な当たり判定　計算回数も固定なので処理効率は安定
+// 片方の球の判定を0にすれば単純な距離判定も作れる
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 bool KdBoxCollision::Intersects(const KdCollider::RayInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* /*pRes*/)
 {
 	if (!m_enable) { return false; }
@@ -556,6 +659,20 @@ bool KdBoxCollision::Intersects(const KdCollider::RayInfo& target, const Math::M
 	m_Abox.Transform(myAABBShape, world);
 	m_Obox.Transform(myOBBShape, world);
 	bool isHit = (!m_IsOriented) ? myAABBShape.Intersects(target.m_pos, target.m_dir, AABBdist) : myOBBShape.Intersects(target.m_pos, target.m_dir, AABBdist);
+
+	// 即結果を返す(HITしたかどうかだけが知れる)
+	return isHit;
+}
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// BOXvsカプセルの当たり判定
+// 判定回数は 1 回　計算自体も軽く最も軽量な当たり判定　計算回数も固定なので処理効率は安定
+// 片方の球の判定を0にすれば単純な距離判定も作れる
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdBoxCollision::Intersects(const KdCollider::CapsuleInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* /*pRes*/)
+{
+	if (!m_enable) { return false; }
+
+	bool isHit = false;
 
 	// 即結果を返す(HITしたかどうかだけが知れる)
 	return isHit;
@@ -735,6 +852,16 @@ bool KdModelCollision::Intersects(const KdCollider::RayInfo& target, const Math:
 	return isHit;
 }
 
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// モデルvsカプセルの当たり判定
+// 判定回数は メッシュの個数 x 各メッシュのポリゴン数 計算回数がモデルのデータ依存のため処理効率は不安定
+// 単純に計算回数が多くなる可能性があるため重くなりがち
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdModelCollision::Intersects(const KdCollider::CapsuleInfo& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+{
+	// TODO: 当たり計算は各自必要に応じて拡張して下さい
+	return false;
+}
 
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
 // PolygonCollision
@@ -828,4 +955,147 @@ bool KdPolygonCollision::Intersects(const KdCollider::RayInfo& target, const Mat
 	}
 
 	return true;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// 多角形ポリゴン(頂点の集合体)vsカプセルの当たり判定
+// 判定回数は ポリゴンの個数 計算回数がポリゴンデータ依存のため処理効率は不安定
+// 単純に計算回数が多くなる可能性があるため重くなりがち
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdPolygonCollision::Intersects(const KdCollider::CapsuleInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
+{
+	// TODO: 当たり計算は各自必要に応じて拡張して下さい
+	return false;
+}
+
+// ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+// CapsuleCollision
+// カプセルの形状
+// ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// カプセルvs球の当たり判定
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdCapsuleCollision::Intersects(const DirectX::BoundingSphere& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
+{
+	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
+	if (!m_enable || !m_shape) { return false; }
+
+	Math::Vector3 capsuleCenter = Math::Vector3::Transform(m_shape->m_offset, world);
+	Math::Vector3 up = world.Up();
+	float upScale = up.Length();
+	if (upScale <= kCapsuleEpsilon)
+	{
+		up = Math::Vector3::Up;
+		upScale = 1.0f;
+	}
+	else
+	{
+		up.Normalize();
+	}
+
+	float radiusScale = world.Right().Length();
+	float backwardScale = world.Backward().Length();
+	if (backwardScale > radiusScale)
+	{
+		radiusScale = backwardScale;
+	}
+	if (radiusScale <= kCapsuleEpsilon)
+	{
+		radiusScale = 1.0f;
+	}
+
+	float capsuleRadius = m_shape->m_radius;
+	if (capsuleRadius < 0.0f)
+	{
+		capsuleRadius = 0.0f;
+	}
+	capsuleRadius *= radiusScale;
+
+	float capsuleHeight = m_shape->m_height;
+	if (capsuleHeight < 0.0f)
+	{
+		capsuleHeight = 0.0f;
+	}
+	capsuleHeight *= upScale;
+	if (capsuleHeight < capsuleRadius * 2.0f)
+	{
+		capsuleHeight = capsuleRadius * 2.0f;
+	}
+
+	float cylinderLength = capsuleHeight - capsuleRadius * 2.0f;
+	Math::Vector3 capsuleStart = capsuleCenter - up * (cylinderLength * 0.5f);
+	Math::Vector3 capsuleEnd = capsuleCenter + up * (cylinderLength * 0.5f);
+
+	Math::Vector3 closestPos = ClosestPointOnSegment(Math::Vector3(target.Center), capsuleStart, capsuleEnd);
+	Math::Vector3 capsuleToTarget = Math::Vector3(target.Center) - closestPos;
+
+	float needDistance = capsuleRadius + target.Radius;
+	bool isHit = capsuleToTarget.LengthSquared() <= needDistance * needDistance;
+
+	// 詳細リザルトが必要無ければ即結果を返す
+	if (!pRes) { return isHit; }
+
+	// 当たった時のみ計算
+	if (isHit)
+	{
+		float betweenDistance = capsuleToTarget.Length();
+
+		pRes->m_hitDir = NormalizeOrFallback(
+			capsuleToTarget,
+			Math::Vector3(target.Center) - capsuleCenter,
+			world.Right(),
+			up
+		);
+
+		pRes->m_overlapDistance = needDistance - betweenDistance;
+
+		pRes->m_hitPos = closestPos + pRes->m_hitDir * (capsuleRadius + pRes->m_overlapDistance * 0.5f);
+
+		pRes->m_hitNDir = pRes->m_hitDir;
+	}
+
+	return isHit;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// カプセルvsBOX(AABB)の当たり判定
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdCapsuleCollision::Intersects(const DirectX::BoundingBox& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+{
+	if (!m_enable) { return false; }
+
+	// TODO: 当たり計算は各自必要に応じて拡張して下さい
+	return false;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// カプセルvsBOX(OBB)の当たり判定
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdCapsuleCollision::Intersects(const DirectX::BoundingOrientedBox& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+{
+	if (!m_enable) { return false; }
+
+	// TODO: 当たり計算は各自必要に応じて拡張して下さい
+	return false;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// カプセルvsレイの当たり判定
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdCapsuleCollision::Intersects(const KdCollider::RayInfo& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+{
+	if (!m_enable) { return false; }
+
+	return false;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// カプセルvsカプセルの当たり判定
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+bool KdCapsuleCollision::Intersects(const KdCollider::CapsuleInfo& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+{
+	if (!m_enable) { return false; }
+
+	return false;
 }
