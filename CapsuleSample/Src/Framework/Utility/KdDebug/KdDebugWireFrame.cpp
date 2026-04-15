@@ -234,7 +234,7 @@ void KdDebugWireFrame::AddDebugBox(const Math::Matrix& matrix, const Math::Vecto
 }
 
 // デバッグカプセルの描画
-void KdDebugWireFrame::AddDebugCapsule(const Math::Matrix& matrix, float radius, float height, const Math::Vector3& offset, const Math::Color& col)
+void KdDebugWireFrame::AddDebugCapsule(const Math::Matrix& matrix, const Math::Vector3& offset, float height, float radius, const Math::Color& col)
 {
 	if (radius <= 0.0f) { return; }
 	const float epsilon = 0.0001f;

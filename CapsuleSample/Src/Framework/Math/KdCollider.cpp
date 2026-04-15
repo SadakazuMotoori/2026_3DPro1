@@ -1113,9 +1113,182 @@ bool KdCapsuleCollision::Intersects(const KdCollider::RayInfo& /*target*/, const
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // カプセルvsカプセルの当たり判定
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-bool KdCapsuleCollision::Intersects(const KdCollider::CapsuleInfo& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+bool KdCapsuleCollision::Intersects(const KdCollider::CapsuleInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
 {
-	if (!m_enable) { return false; }
+	if (!m_enable || !m_shape) { return false; }
 
-	return false;
+	// まずは登録側カプセルを「中心線分 + 半径」に変換する
+	Math::Vector3 myPos = m_shape->m_pos + m_shape->m_offset;
+	Math::Vector3 myCenter = Math::Vector3::Transform(myPos, world);
+
+	// 行列の Up 方向をカプセルの縦軸として使う
+	Math::Vector3 myUp = world.Up();
+	float myUpScale = myUp.Length();
+	if (myUpScale <= kCapsuleEpsilon)
+	{
+		myUp = Math::Vector3::Up;
+		myUpScale = 1.0f;
+	}
+	else
+	{
+		myUp.Normalize();
+	}
+
+	// 半径は横方向スケールの大きい方を採用して潰れを防ぐ
+	float myRadiusScale = world.Right().Length();
+	float myBackwardScale = world.Backward().Length();
+	if (myBackwardScale > myRadiusScale)
+	{
+		myRadiusScale = myBackwardScale;
+	}
+	if (myRadiusScale <= kCapsuleEpsilon)
+	{
+		myRadiusScale = 1.0f;
+	}
+
+	float myRadius = m_shape->m_radius;
+	if (myRadius < 0.0f)
+	{
+		myRadius = 0.0f;
+	}
+	myRadius *= myRadiusScale;
+
+	float myHeight = m_shape->m_height;
+	if (myHeight < 0.0f)
+	{
+		myHeight = 0.0f;
+	}
+	myHeight *= myUpScale;
+	if (myHeight < myRadius * 2.0f)
+	{
+		// 高さが直径より小さい場合は球として扱える最小サイズに丸める
+		myHeight = myRadius * 2.0f;
+	}
+
+	float myCylinderLength = myHeight - myRadius * 2.0f;
+	Math::Vector3 myStart = myCenter - myUp * (myCylinderLength * 0.5f);
+	Math::Vector3 myEnd = myCenter + myUp * (myCylinderLength * 0.5f);
+
+	// 対象側も同様に「中心線分 + 半径」へ変換する
+	Math::Vector3 targetCenter = target.m_pos + target.m_offset;
+	// CapsuleInfo だけでは回転情報を持てないので対象側はワールドUp基準で扱う
+	Math::Vector3 targetUp = Math::Vector3::Up;
+
+	float targetRadius = target.m_radius;
+	if (targetRadius < 0.0f)
+	{
+		targetRadius = 0.0f;
+	}
+
+	float targetHeight = target.m_height;
+	if (targetHeight < 0.0f)
+	{
+		targetHeight = 0.0f;
+	}
+	if (targetHeight < targetRadius * 2.0f)
+	{
+		targetHeight = targetRadius * 2.0f;
+	}
+
+	float targetCylinderLength = targetHeight - targetRadius * 2.0f;
+	Math::Vector3 targetStart = targetCenter - targetUp * (targetCylinderLength * 0.5f);
+	Math::Vector3 targetEnd = targetCenter + targetUp * (targetCylinderLength * 0.5f);
+
+	Math::Vector3 d1 = myEnd - myStart;
+	Math::Vector3 d2 = targetEnd - targetStart;
+	Math::Vector3 r = myStart - targetStart;
+
+	float a = DirectX::XMVector3Dot(d1, d1).m128_f32[0];
+	float e = DirectX::XMVector3Dot(d2, d2).m128_f32[0];
+	float f = DirectX::XMVector3Dot(d2, r).m128_f32[0];
+
+	// 2本の線分上で最も近くなる位置 s,t を求める
+	float s = 0.0f;
+	float t = 0.0f;
+
+	if (a <= kCapsuleEpsilon && e <= kCapsuleEpsilon)
+	{
+		// 両方ほぼ点
+		s = 0.0f;
+		t = 0.0f;
+	}
+	else if (a <= kCapsuleEpsilon)
+	{
+		// 自分側だけほぼ点
+		s = 0.0f;
+		t = std::clamp(f / e, 0.0f, 1.0f);
+	}
+	else
+	{
+		float c = DirectX::XMVector3Dot(d1, r).m128_f32[0];
+
+		if (e <= kCapsuleEpsilon)
+		{
+			// 対象側だけほぼ点
+			t = 0.0f;
+			s = std::clamp(-c / a, 0.0f, 1.0f);
+		}
+		else
+		{
+			// 一般的な線分同士。無限直線で最短になる位置を出してから線分範囲へ丸める
+			float b = DirectX::XMVector3Dot(d1, d2).m128_f32[0];
+			float denom = a * e - b * b;
+
+			if (fabsf(denom) > kCapsuleEpsilon)
+			{
+				s = std::clamp((b * f - c * e) / denom, 0.0f, 1.0f);
+			}
+			else
+			{
+				// ほぼ平行なら片方の始点寄せから始める
+				s = 0.0f;
+			}
+
+			t = (b * s + f) / e;
+
+			if (t < 0.0f)
+			{
+				// t が範囲外なら対象側始点に合わせて再計算
+				t = 0.0f;
+				s = std::clamp(-c / a, 0.0f, 1.0f);
+			}
+			else if (t > 1.0f)
+			{
+				// t が範囲外なら対象側終点に合わせて再計算
+				t = 1.0f;
+				s = std::clamp((b - c) / a, 0.0f, 1.0f);
+			}
+		}
+	}
+
+	// 最短距離になる2点間ベクトルが、そのまま押し出し方向の元になる
+	Math::Vector3 myClosest = myStart + d1 * s;
+	Math::Vector3 targetClosest = targetStart + d2 * t;
+	Math::Vector3 hitVec = targetClosest - myClosest;
+
+	float needDistance = myRadius + targetRadius;
+	bool isHit = hitVec.LengthSquared() <= needDistance * needDistance;
+
+	if (!pRes) { return isHit; }
+
+	if (isHit)
+	{
+		float betweenDistance = hitVec.Length();
+
+		// ベクトルが潰れていても押し出し方向が失われないようフォールバックを用意する
+		pRes->m_hitDir = NormalizeOrFallback(
+			hitVec,
+			targetCenter - myCenter,
+			world.Right(),
+			myUp
+		);
+
+		// 必要距離との差分が重なり量
+		pRes->m_overlapDistance = needDistance - betweenDistance;
+		// 接触位置は登録側カプセル表面と対象側カプセル表面の中間点
+		pRes->m_hitPos = myClosest + pRes->m_hitDir * (myRadius + pRes->m_overlapDistance * 0.5f);
+		pRes->m_hitNDir = pRes->m_hitDir;
+	}
+
+	return isHit;
 }

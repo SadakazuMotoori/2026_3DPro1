@@ -33,5 +33,5 @@ void Enemy01::Update()
 void Enemy01::PreDraw()
 {
 //	m_pDebugWire->AddDebugSphere(GetMatrix().Translation() + Math::Vector3(0.0f, 1.0f, 0.0f), 0.5f);
-	m_pDebugWire->AddDebugCapsule(GetMatrix(), 0.3f, 1.5f, { 0,0.7f,0 });
+	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.7f,0 }, 1.5f, 0.3f);
 }
