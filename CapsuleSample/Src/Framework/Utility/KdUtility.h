@@ -14,6 +14,9 @@ namespace Math = DirectX::SimpleMath;
 constexpr float KdToRadians = (3.141592654f / 180.0f);
 constexpr float KdToDegrees = (180.0f / 3.141592654f);
 
+// コリジョン計算用の微小値
+constexpr float KdCollisionEpsilon = 0.0001f;
+
 // 安全にReleaseするための関数
 template<class T>
 void KdSafeRelease(T*& p)

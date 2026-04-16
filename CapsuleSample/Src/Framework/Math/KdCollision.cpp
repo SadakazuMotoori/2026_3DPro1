@@ -1,6 +1,11 @@
 ﻿#include "KdCollision.h"
 using namespace DirectX;
 
+namespace
+{
+	constexpr int kBoxSolveIteration = 4;
+}
+
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
 // レイの当たり判定
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
@@ -309,6 +314,138 @@ static void SetSphereResult(CollisionMeshResult& result, bool isHit, const Direc
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// BOX関連の補助関数
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+static bool CheckTriBoxAxis(
+	const Math::Vector3& axisCandidate,
+	const Math::Vector3& triV0,
+	const Math::Vector3& triV1,
+	const Math::Vector3& triV2,
+	const Math::Vector3& triCenter,
+	const Math::Vector3& boxExtents,
+	float& minOverlap,
+	Math::Vector3& bestAxis)
+{
+	if (axisCandidate.LengthSquared() <= KdCollisionEpsilon)
+	{
+		return true;
+	}
+
+	Math::Vector3 axis = axisCandidate;
+	axis.Normalize();
+
+	const float proj0 = triV0.Dot(axis);
+	const float proj1 = triV1.Dot(axis);
+	const float proj2 = triV2.Dot(axis);
+	const float triMin = std::min(proj0, std::min(proj1, proj2));
+	const float triMax = std::max(proj0, std::max(proj1, proj2));
+	const float boxRadius =
+		boxExtents.x * fabsf(axis.x) +
+		boxExtents.y * fabsf(axis.y) +
+		boxExtents.z * fabsf(axis.z);
+
+	if (triMin > boxRadius || triMax < -boxRadius)
+	{
+		return false;
+	}
+
+	const float overlap = std::min(boxRadius - triMin, triMax + boxRadius);
+	const float triCenterProj = triCenter.Dot(axis);
+	const Math::Vector3 signedAxis = (triCenterProj >= 0.0f) ? -axis : axis;
+
+	if (overlap < minOverlap)
+	{
+		minOverlap = overlap;
+		bestAxis = signedAxis;
+	}
+
+	return true;
+}
+
+static bool ComputeTriangleVsBoxResult(
+	const DirectX::XMVECTOR& worldV0,
+	const DirectX::XMVECTOR& worldV1,
+	const DirectX::XMVECTOR& worldV2,
+	const DirectX::BoundingOrientedBox& box,
+	CollisionMeshResult* pResult)
+{
+	const DirectX::XMVECTOR boxCenter = DirectX::XMLoadFloat3(&box.Center);
+	const DirectX::XMVECTOR boxOrientation = DirectX::XMLoadFloat4(&box.Orientation);
+
+	const Math::Vector3 localV0 = DirectX::XMVector3InverseRotate(worldV0 - boxCenter, boxOrientation);
+	const Math::Vector3 localV1 = DirectX::XMVector3InverseRotate(worldV1 - boxCenter, boxOrientation);
+	const Math::Vector3 localV2 = DirectX::XMVector3InverseRotate(worldV2 - boxCenter, boxOrientation);
+	const Math::Vector3 triCenter = (localV0 + localV1 + localV2) / 3.0f;
+	const Math::Vector3 triEdge0 = localV1 - localV0;
+	const Math::Vector3 triEdge1 = localV2 - localV1;
+	const Math::Vector3 triEdge2 = localV0 - localV2;
+	const Math::Vector3 triNormal = triEdge0.Cross(localV2 - localV0);
+	const Math::Vector3 boxExtents(box.Extents);
+
+	float minOverlap = FLT_MAX;
+	Math::Vector3 bestAxis = Math::Vector3::Zero;
+
+	if (!CheckTriBoxAxis(Math::Vector3::Right, localV0, localV1, localV2, triCenter, boxExtents, minOverlap, bestAxis)) { return false; }
+	if (!CheckTriBoxAxis(Math::Vector3::Up, localV0, localV1, localV2, triCenter, boxExtents, minOverlap, bestAxis)) { return false; }
+	if (!CheckTriBoxAxis(Math::Vector3::Backward, localV0, localV1, localV2, triCenter, boxExtents, minOverlap, bestAxis)) { return false; }
+	if (!CheckTriBoxAxis(triNormal, localV0, localV1, localV2, triCenter, boxExtents, minOverlap, bestAxis)) { return false; }
+
+	const Math::Vector3 boxAxes[3] = { Math::Vector3::Right, Math::Vector3::Up, Math::Vector3::Backward };
+	const Math::Vector3 triEdges[3] = { triEdge0, triEdge1, triEdge2 };
+	for (int edgeIndex = 0; edgeIndex < 3; ++edgeIndex)
+	{
+		for (int axisIndex = 0; axisIndex < 3; ++axisIndex)
+		{
+			if (!CheckTriBoxAxis(triEdges[edgeIndex].Cross(boxAxes[axisIndex]), localV0, localV1, localV2, triCenter, boxExtents, minOverlap, bestAxis))
+			{
+				return false;
+			}
+		}
+	}
+
+	if (!pResult)
+	{
+		return true;
+	}
+
+	DirectX::XMVECTOR localHitPos = {};
+	KdPointToTriangle(DirectX::XMVectorZero(), localV0, localV1, localV2, localHitPos);
+
+	Math::Vector3 hitDirLocal = bestAxis;
+	if (hitDirLocal.LengthSquared() <= KdCollisionEpsilon)
+	{
+		hitDirLocal = triNormal;
+	}
+	if (hitDirLocal.LengthSquared() <= KdCollisionEpsilon)
+	{
+		hitDirLocal = Math::Vector3::Up;
+	}
+	hitDirLocal.Normalize();
+
+	Math::Vector3 hitNDirLocal = triNormal;
+	if (hitNDirLocal.LengthSquared() <= KdCollisionEpsilon)
+	{
+		hitNDirLocal = hitDirLocal;
+	}
+	else
+	{
+		hitNDirLocal.Normalize();
+		if (hitNDirLocal.Dot(hitDirLocal) < 0.0f)
+		{
+			hitNDirLocal *= -1.0f;
+		}
+	}
+
+	pResult->m_hit = true;
+	pResult->m_hitPos = DirectX::XMVector3Rotate(localHitPos, boxOrientation) + boxCenter;
+	pResult->m_hitDir = DirectX::XMVector3Normalize(DirectX::XMVector3Rotate(hitDirLocal, boxOrientation));
+	pResult->m_overlapDistance = minOverlap;
+	pResult->m_hitNDir = DirectX::XMVector3Normalize(DirectX::XMVector3Rotate(hitNDirLocal, boxOrientation));
+
+	return true;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // スフィア対ポリゴン(KdMesh以外の任意の多角形ポリゴン)の当たり判定本体
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 bool PolygonsIntersect(const KdPolygon& poly, const DirectX::BoundingSphere& sphere, const DirectX::XMMATRIX& matrix, CollisionMeshResult* pResult)
@@ -424,6 +561,113 @@ bool MeshIntersect(const KdMesh& mesh, const DirectX::BoundingSphere& sphere,
 	{
 		SetSphereResult(*pResult, isHit, XMVector3TransformCoord(finalHitPos, matrix),
 			XMVector3TransformCoord(finalPos, matrix), finalFace, XMLoadFloat3(&sphere.Center));
+	}
+
+	return isHit;
+}
+
+// ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+// BOXの当たり判定
+// ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
+
+bool MeshIntersect(const KdMesh& mesh, const DirectX::BoundingBox& box,
+	const DirectX::XMMATRIX& matrix, CollisionMeshResult* pResult)
+{
+	DirectX::BoundingOrientedBox orientedBox;
+	DirectX::BoundingOrientedBox::CreateFromBoundingBox(orientedBox, box);
+	return MeshIntersect(mesh, orientedBox, matrix, pResult);
+}
+
+bool MeshIntersect(const KdMesh& mesh, const DirectX::BoundingOrientedBox& box,
+	const DirectX::XMMATRIX& matrix, CollisionMeshResult* pResult)
+{
+	//------------------------------------------
+	// ブロードフェイズ
+	// 　高速化のため、まずは境界ボックス(AABB)で判定
+	//------------------------------------------
+	{
+		DirectX::BoundingBox aabb;
+		mesh.GetBoundingBox().Transform(aabb, matrix);
+
+		if (aabb.Intersects(box) == false) { return false; }
+	}
+
+	// DEBUGビルドでも速度を維持するため、別変数に拾っておく
+	const auto* pFaces = &mesh.GetFaces()[0];
+	size_t faceNum = mesh.GetFaces().size();
+	auto& vertices = mesh.GetVertexPositions();
+
+	bool isHit = false;
+	DirectX::BoundingOrientedBox pushedBox = box;
+	DirectX::XMVECTOR totalPush = DirectX::XMVectorZero();
+	DirectX::XMVECTOR finalHitPos = DirectX::XMVectorZero();
+	DirectX::XMVECTOR finalHitNDir = DirectX::XMVectorZero();
+	DirectX::XMVECTOR lastHitDir = DirectX::XMVectorZero();
+
+	for (int solve = 0; solve < kBoxSolveIteration; ++solve)
+	{
+		bool hitThisSolve = false;
+		DirectX::XMVECTOR bestPush = DirectX::XMVectorZero();
+		CollisionMeshResult bestResult = {};
+
+		for (UINT faceIdx = 0; faceIdx < faceNum; ++faceIdx)
+		{
+			const UINT* idx = pFaces[faceIdx].Idx;
+			const DirectX::XMVECTOR worldV0 = DirectX::XMVector3TransformCoord(vertices[idx[0]], matrix);
+			const DirectX::XMVECTOR worldV1 = DirectX::XMVector3TransformCoord(vertices[idx[1]], matrix);
+			const DirectX::XMVECTOR worldV2 = DirectX::XMVector3TransformCoord(vertices[idx[2]], matrix);
+
+			CollisionMeshResult tmpResult = {};
+			CollisionMeshResult* pTmpResult = pResult ? &tmpResult : nullptr;
+			if (!ComputeTriangleVsBoxResult(worldV0, worldV1, worldV2, pushedBox, pTmpResult))
+			{
+				continue;
+			}
+
+			if (!pResult) { return true; }
+
+			hitThisSolve = true;
+			isHit = true;
+
+			const DirectX::XMVECTOR push = DirectX::XMVectorScale(tmpResult.m_hitDir, tmpResult.m_overlapDistance);
+			if (DirectX::XMVector3LengthSq(push).m128_f32[0] > DirectX::XMVector3LengthSq(bestPush).m128_f32[0])
+			{
+				bestPush = push;
+				bestResult = tmpResult;
+			}
+		}
+
+		if (!hitThisSolve || DirectX::XMVector3LengthSq(bestPush).m128_f32[0] <= KdCollisionEpsilon)
+		{
+			break;
+		}
+
+		DirectX::XMVECTOR pushedCenter = DirectX::XMLoadFloat3(&pushedBox.Center);
+		pushedCenter += bestPush;
+		DirectX::XMStoreFloat3(&pushedBox.Center, pushedCenter);
+
+		totalPush += bestPush;
+		finalHitPos = bestResult.m_hitPos;
+		finalHitNDir = bestResult.m_hitNDir;
+		lastHitDir = bestResult.m_hitDir;
+	}
+
+	if (pResult && isHit)
+	{
+		pResult->m_hit = true;
+		pResult->m_hitPos = finalHitPos;
+		pResult->m_overlapDistance = DirectX::XMVector3Length(totalPush).m128_f32[0];
+
+		if (pResult->m_overlapDistance > KdCollisionEpsilon)
+		{
+			pResult->m_hitDir = DirectX::XMVector3Normalize(totalPush);
+		}
+		else
+		{
+			pResult->m_hitDir = lastHitDir;
+		}
+
+		pResult->m_hitNDir = finalHitNDir;
 	}
 
 	return isHit;

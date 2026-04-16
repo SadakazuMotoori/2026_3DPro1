@@ -12,12 +12,12 @@ void Enemy01::Init()
 		m_pCollider = std::make_unique<KdCollider>();
 
 		// モデル登録
-	//	KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
-	//	m_pCollider->RegisterCollisionShape("Enemy", m_spModel, KdCollider::TypeBump);
+		KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
+		m_pCollider->RegisterCollisionShape("Enemy", m_spModel, KdCollider::TypeBump);
 	 
 		// カプセル登録
-		KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
-		m_pCollider->RegisterCollisionShape("Enemy", _cpInfo);
+	//	KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
+	//	m_pCollider->RegisterCollisionShape("Enemy", _cpInfo);
 
 		// 球登録
 	//	DirectX::BoundingSphere _info({ 0.0f, 1.0f, 0.0f }, 0.5f);
@@ -54,7 +54,7 @@ void Enemy01::PreDraw()
 //	m_pDebugWire->AddDebugSphere(GetMatrix().Translation() + Math::Vector3(0.0f, 1.0f, 0.0f), 0.5f);
 
  	// カプセルデバッグワイヤーの描画
-	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.7f,0 }, 1.5f, 0.3f);
+//	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.7f,0 }, 1.5f, 0.3f);
 
 	// BOX(AABB)デバッグワイヤーの描画
 //	m_pDebugWire->AddDebugBox(GetMatrix(), {0.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f });

@@ -8,15 +8,6 @@
 // 3. 各 Collision クラス: 形状ごとの実際の当たり判定処理
 namespace
 {
-	// ほぼ 0 とみなす閾値。
-	// 正規化や距離比較で極小値をそのまま使うと不安定になりやすいため、
-	// 「長さが十分にあるか」の判定に共通で使う。
-	constexpr float kCapsuleEpsilon = 0.0001f;
-
-	// SAT(分離軸定理) 用の微小値。
-	// 浮動小数誤差で「ほぼ接している」状態が不安定にならないようにする。
-	constexpr float kSatEpsilon = 0.0001f;
-
 	// カプセルの押し戻しを一度で終えず、最大何回まで段階的に解決するか。
 	constexpr int kCapsuleSolveIteration = 4;
 
@@ -71,28 +62,28 @@ namespace
 	// 「結果として必ず正規化済みの向きが 1 本返る」ようにする補助関数。
 	Math::Vector3 NormalizeOrFallback(Math::Vector3 dir, const Math::Vector3& fallback1, const Math::Vector3& fallback2, const Math::Vector3& fallback3)
 	{
-		if (dir.LengthSquared() > kCapsuleEpsilon)
+		if (dir.LengthSquared() > KdCollisionEpsilon)
 		{
 			dir.Normalize();
 			return dir;
 		}
 
 		dir = fallback1;
-		if (dir.LengthSquared() > kCapsuleEpsilon)
+		if (dir.LengthSquared() > KdCollisionEpsilon)
 		{
 			dir.Normalize();
 			return dir;
 		}
 
 		dir = fallback2;
-		if (dir.LengthSquared() > kCapsuleEpsilon)
+		if (dir.LengthSquared() > KdCollisionEpsilon)
 		{
 			dir.Normalize();
 			return dir;
 		}
 
 		dir = fallback3;
-		if (dir.LengthSquared() > kCapsuleEpsilon)
+		if (dir.LengthSquared() > KdCollisionEpsilon)
 		{
 			dir.Normalize();
 			return dir;
@@ -114,7 +105,7 @@ namespace
 	{
 		Math::Vector3 segment = end - start;
 		float segmentLengthSqr = segment.LengthSquared();
-		if (segmentLengthSqr <= kCapsuleEpsilon)
+		if (segmentLengthSqr <= KdCollisionEpsilon)
 		{
 			return start;
 		}
@@ -182,7 +173,7 @@ namespace
 		CapsuleShapeData result;
 		result.m_center = center;
 
-		if (upScale <= kCapsuleEpsilon || upAxis.LengthSquared() <= kCapsuleEpsilon)
+		if (upScale <= KdCollisionEpsilon || upAxis.LengthSquared() <= KdCollisionEpsilon)
 		{
 			// 軸情報が壊れている時は Y 軸上向きを仮採用し、
 			// 少なくとも「高さ方向を持つカプセル」として扱えるようにする。
@@ -195,7 +186,7 @@ namespace
 			result.m_up.Normalize();
 		}
 
-		if (radiusScale <= kCapsuleEpsilon)
+		if (radiusScale <= KdCollisionEpsilon)
 		{
 			radiusScale = 1.0f;
 		}
@@ -254,7 +245,7 @@ namespace
 	{
 		CapsuleSamplePoints result;
 
-		if (capsule.m_cylinderLength <= kCapsuleEpsilon)
+		if (capsule.m_cylinderLength <= KdCollisionEpsilon)
 		{
 			// 高さがほぼ直径しかないカプセルは、実質球として 1 サンプルで十分。
 			result.m_centers[0] = capsule.m_center;
@@ -263,7 +254,7 @@ namespace
 		}
 
 		float sampleStep = capsule.m_radius * 0.5f;
-		if (sampleStep <= kCapsuleEpsilon)
+		if (sampleStep <= KdCollisionEpsilon)
 		{
 			sampleStep = capsule.m_cylinderLength;
 		}
@@ -455,7 +446,7 @@ namespace
 				}
 			}
 
-			if (!hitThisSolve || bestCorrection.LengthSquared() <= kCapsuleEpsilon)
+			if (!hitThisSolve || bestCorrection.LengthSquared() <= KdCollisionEpsilon)
 			{
 				break;
 			}
@@ -549,7 +540,7 @@ namespace
 			for (int j = 0; j < 3; ++j)
 			{
 				rot[i][j] = DirectX::XMVector3Dot(myAxes[i], targetAxes[j]).m128_f32[0];
-				absRot[i][j] = fabsf(rot[i][j]) + kSatEpsilon;
+				absRot[i][j] = fabsf(rot[i][j]) + KdCollisionEpsilon;
 			}
 		}
 
@@ -562,7 +553,7 @@ namespace
 		{
 			if (overlap < 0.0f)
 			{
-				if (overlap < -kSatEpsilon)
+				if (overlap < -KdCollisionEpsilon)
 				{
 					return false;
 				}
@@ -570,7 +561,7 @@ namespace
 				overlap = 0.0f;
 			}
 
-			if (axis.LengthSquared() <= kSatEpsilon)
+			if (axis.LengthSquared() <= KdCollisionEpsilon)
 			{
 				return true;
 			}
@@ -629,7 +620,7 @@ namespace
 			for (int j = 0; j < 3; ++j)
 			{
 				const Math::Vector3 axis = myAxes[i].Cross(targetAxes[j]);
-				if (axis.LengthSquared() <= kSatEpsilon)
+				if (axis.LengthSquared() <= KdCollisionEpsilon)
 				{
 					continue;
 				}
@@ -683,19 +674,19 @@ namespace
 		float s = 0.0f;
 		float t = 0.0f;
 
-		if (a <= kCapsuleEpsilon && e <= kCapsuleEpsilon)
+		if (a <= KdCollisionEpsilon && e <= KdCollisionEpsilon)
 		{
 			s = 0.0f;
 			t = 0.0f;
 		}
-		else if (a <= kCapsuleEpsilon)
+		else if (a <= KdCollisionEpsilon)
 		{
 			t = std::clamp(f / e, 0.0f, 1.0f);
 		}
 		else
 		{
 			const float c = DirectX::XMVector3Dot(d1, r).m128_f32[0];
-			if (e <= kCapsuleEpsilon)
+			if (e <= KdCollisionEpsilon)
 			{
 				s = std::clamp(-c / a, 0.0f, 1.0f);
 			}
@@ -704,7 +695,7 @@ namespace
 				const float b = DirectX::XMVector3Dot(d1, d2).m128_f32[0];
 				const float denom = a * e - b * b;
 
-				if (fabsf(denom) > kCapsuleEpsilon)
+				if (fabsf(denom) > KdCollisionEpsilon)
 				{
 					s = std::clamp((b * f - c * e) / denom, 0.0f, 1.0f);
 				}
@@ -1510,10 +1501,11 @@ bool KdModelCollision::Intersects(const DirectX::BoundingSphere& target, const M
 // 判定回数は メッシュの個数 x 各メッシュのポリゴン数 計算回数がモデルのデータ依存のため処理効率は不安定
 // 単純に計算回数が多くなる可能性があるため重くなりがち
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-bool KdModelCollision::Intersects(const DirectX::BoundingBox& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+bool KdModelCollision::Intersects(const DirectX::BoundingBox& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
 {
-	// TODO: 当たり計算は各自必要に応じて拡張して下さい
-	return false;
+	DirectX::BoundingOrientedBox targetBox;
+	DirectX::BoundingOrientedBox::CreateFromBoundingBox(targetBox, target);
+	return Intersects(targetBox, world, pRes);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -1521,10 +1513,74 @@ bool KdModelCollision::Intersects(const DirectX::BoundingBox& /*target*/, const 
 // 判定回数は メッシュの個数 x 各メッシュのポリゴン数 計算回数がモデルのデータ依存のため処理効率は不安定
 // 単純に計算回数が多くなる可能性があるため重くなりがち
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-bool KdModelCollision::Intersects(const DirectX::BoundingOrientedBox& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+bool KdModelCollision::Intersects(const DirectX::BoundingOrientedBox& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
 {
-	// TODO: 当たり計算は各自必要に応じて拡張して下さい
-	return false;
+	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
+	if (!m_enable || !m_shape) { return false; }
+
+	std::shared_ptr<KdModelData> spModelData = m_shape->GetData();
+
+	// データが無ければ判定不能なので返る
+	if (!spModelData) { return false; }
+
+	const std::vector<KdModelData::Node>& dataNodes = spModelData->GetOriginalNodes();
+	const std::vector<KdModelWork::Node>& workNodes = m_shape->GetNodes();
+	const std::vector<int>& collisionNodeIndices = spModelData->GetCollisionMeshNodeIndices();
+
+	DirectX::BoundingOrientedBox pushedBox = target;
+	Math::Vector3 pushedBoxCenter = DirectX::XMLoadFloat3(&pushedBox.Center);
+
+	bool isHit = false;
+
+	Math::Vector3 hitPos;
+	Math::Vector3 hitNDir;
+
+	for (int index : collisionNodeIndices)
+	{
+		const KdModelData::Node& dataNode = dataNodes[index];
+		const KdModelWork::Node& workNode = workNodes[index];
+
+		if (!dataNode.m_spMesh) { continue; }
+
+		CollisionMeshResult tmpResult;
+		CollisionMeshResult* pTmpResult = pRes ? &tmpResult : nullptr;
+
+		if (!MeshIntersect(*dataNode.m_spMesh, pushedBox, workNode.m_worldTransform * world, pTmpResult))
+		{
+			continue;
+		}
+
+		// 詳細リザルトが必要無ければ即結果を返す
+		if (!pRes) { return true; }
+
+		isHit = true;
+
+		pushedBoxCenter = DirectX::XMVectorAdd(pushedBoxCenter, DirectX::XMVectorScale(tmpResult.m_hitDir, tmpResult.m_overlapDistance));
+		DirectX::XMStoreFloat3(&pushedBox.Center, pushedBoxCenter);
+
+		hitPos = tmpResult.m_hitPos;
+		hitNDir = tmpResult.m_hitNDir;
+	}
+
+	if (pRes && isHit)
+	{
+		pRes->m_hitPos = hitPos;
+		pRes->m_hitDir = DirectX::XMVectorSubtract(DirectX::XMLoadFloat3(&pushedBox.Center), DirectX::XMLoadFloat3(&target.Center));
+
+		pRes->m_overlapDistance = DirectX::XMVector3Length(pRes->m_hitDir).m128_f32[0];
+		if (pRes->m_overlapDistance > KdCollisionEpsilon)
+		{
+			pRes->m_hitDir = DirectX::XMVector3Normalize(pRes->m_hitDir);
+		}
+		else
+		{
+			pRes->m_hitDir = hitNDir;
+		}
+
+		pRes->m_hitNDir = hitNDir;
+	}
+
+	return isHit;
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -1691,7 +1747,7 @@ bool KdModelCollision::Intersects(const KdCollider::CapsuleInfo& target, const M
 		}
 
 		// これ以上押し出しが必要なければ解決終了
-		if (!hitThisSolve || bestPush.LengthSquared() <= kCapsuleEpsilon)
+		if (!hitThisSolve || bestPush.LengthSquared() <= KdCollisionEpsilon)
 		{
 			break;
 		}
