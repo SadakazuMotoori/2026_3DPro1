@@ -85,7 +85,7 @@ void CharacterBase::UpdateCollision()
 {
 	// 地面判定するよ
 	// ----- ----- ----- ----- -----
-/*
+
 	// ①当たり判定(レイ判定)用の情報作成
 	KdCollider::RayInfo rayInfo;
 	// レイの発射位置を設定
@@ -135,7 +135,7 @@ void CharacterBase::UpdateCollision()
 			}
 		}
 	}
-*/	
+	
 /*
 	// その他球による衝突判定
 	if (!m_IsPlayer) return;

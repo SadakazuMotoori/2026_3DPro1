@@ -719,6 +719,120 @@ namespace
 		outPoint2 = start2 + d2 * t;
 	}
 
+	bool IntersectRayCapsule(
+		const KdCollider::RayInfo& ray,
+		const CapsuleShapeData& capsule,
+		float& outHitDistance,
+		Math::Vector3& outHitPos,
+		Math::Vector3& outHitNDir,
+		const Math::Vector3& fallback1,
+		const Math::Vector3& fallback2,
+		const Math::Vector3& fallback3)
+	{
+		if (capsule.m_cylinderLength <= KdCollisionEpsilon)
+		{
+			DirectX::BoundingSphere sphere;
+			sphere.Center = capsule.m_center;
+			sphere.Radius = capsule.m_radius;
+
+			float hitDistance = 0.0f;
+			if (!sphere.Intersects(ray.m_pos, ray.m_dir, hitDistance) || hitDistance > ray.m_range)
+			{
+				return false;
+			}
+
+			outHitDistance = hitDistance;
+			outHitPos = ray.m_pos + ray.m_dir * hitDistance;
+			outHitNDir = NormalizeOrFallback(outHitPos - capsule.m_center, fallback1, fallback2, fallback3);
+			return true;
+		}
+
+		const Math::Vector3 startClosest = ClosestPointOnSegment(ray.m_pos, capsule.m_start, capsule.m_end);
+		const Math::Vector3 startToCapsule = ray.m_pos - startClosest;
+		if (startToCapsule.LengthSquared() <= capsule.m_radius * capsule.m_radius)
+		{
+			outHitDistance = 0.0f;
+			outHitPos = ray.m_pos;
+			outHitNDir = NormalizeOrFallback(startToCapsule, fallback1, fallback2, fallback3);
+			return true;
+		}
+
+		float bestHitDistance = FLT_MAX;
+		Math::Vector3 bestHitPos = Math::Vector3::Zero;
+		Math::Vector3 bestHitNDir = Math::Vector3::Zero;
+
+		auto updateSphereHit = [&](const Math::Vector3& center)
+		{
+			DirectX::BoundingSphere sphere;
+			sphere.Center = center;
+			sphere.Radius = capsule.m_radius;
+
+			float hitDistance = 0.0f;
+			if (!sphere.Intersects(ray.m_pos, ray.m_dir, hitDistance))
+			{
+				return;
+			}
+
+			if (hitDistance < 0.0f || hitDistance > ray.m_range || hitDistance >= bestHitDistance)
+			{
+				return;
+			}
+
+			bestHitDistance = hitDistance;
+			bestHitPos = ray.m_pos + ray.m_dir * hitDistance;
+			bestHitNDir = NormalizeOrFallback(bestHitPos - center, fallback1, fallback2, fallback3);
+		};
+
+		updateSphereHit(capsule.m_start);
+		updateSphereHit(capsule.m_end);
+
+		const Math::Vector3 segment = capsule.m_end - capsule.m_start;
+		const float dd = DirectX::XMVector3Dot(segment, segment).m128_f32[0];
+		if (dd > KdCollisionEpsilon)
+		{
+			const Math::Vector3 m = ray.m_pos - capsule.m_start;
+			const float md = DirectX::XMVector3Dot(m, segment).m128_f32[0];
+			const float nd = DirectX::XMVector3Dot(ray.m_dir, segment).m128_f32[0];
+			const float mn = DirectX::XMVector3Dot(m, ray.m_dir).m128_f32[0];
+			const float mm = DirectX::XMVector3Dot(m, m).m128_f32[0];
+
+			const float a = dd - nd * nd;
+			const float c = dd * mm - md * md - capsule.m_radius * capsule.m_radius * dd;
+
+			if (fabsf(a) > KdCollisionEpsilon)
+			{
+				const float b = dd * mn - md * nd;
+				const float discriminant = b * b - a * c;
+				if (discriminant >= 0.0f)
+				{
+					const float hitDistance = (-b - std::sqrt(discriminant)) / a;
+					if (hitDistance >= 0.0f && hitDistance <= ray.m_range && hitDistance < bestHitDistance)
+					{
+						const float y = md + hitDistance * nd;
+						if (y >= 0.0f && y <= dd)
+						{
+							bestHitDistance = hitDistance;
+							bestHitPos = ray.m_pos + ray.m_dir * hitDistance;
+
+							const Math::Vector3 axisPoint = capsule.m_start + segment * (y / dd);
+							bestHitNDir = NormalizeOrFallback(bestHitPos - axisPoint, fallback1, fallback2, fallback3);
+						}
+					}
+				}
+			}
+		}
+
+		if (bestHitDistance == FLT_MAX)
+		{
+			return false;
+		}
+
+		outHitDistance = bestHitDistance;
+		outHitPos = bestHitPos;
+		outHitNDir = bestHitNDir;
+		return true;
+	}
+
 	// 登録済み形状を総当たりし、対象 type に合うものだけへ判定を委譲する共通関数。
 	// 結果リストが不要なら最初の HIT で即 return し、余計な計算を避ける。
 	template <class HitTest>
@@ -1967,11 +2081,37 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingOrientedBox& target, 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // カプセルvsレイの当たり判定
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-bool KdCapsuleCollision::Intersects(const KdCollider::RayInfo& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
+bool KdCapsuleCollision::Intersects(const KdCollider::RayInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
 {
-	if (!m_enable) { return false; }
+	if (!m_enable || !m_shape) { return false; }
 
-	return false;
+	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
+
+	float hitDistance = 0.0f;
+	Math::Vector3 hitPos = Math::Vector3::Zero;
+	Math::Vector3 hitNDir = Math::Vector3::Zero;
+	const bool isHit = IntersectRayCapsule(
+		target,
+		capsule,
+		hitDistance,
+		hitPos,
+		hitNDir,
+		world.Right(),
+		capsule.m_up,
+		-target.m_dir
+	);
+
+	if (!pRes) { return isHit; }
+
+	if (isHit)
+	{
+		pRes->m_hitPos = hitPos;
+		pRes->m_hitDir = target.m_dir * -1.0f;
+		pRes->m_hitNDir = hitNDir;
+		pRes->m_overlapDistance = target.m_range - hitDistance;
+	}
+
+	return isHit;
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
