@@ -2,14 +2,33 @@
 
 #include <array>
 
+// このファイルは大きく 3 つの役割に分かれている。
+// 1. 無名名前空間: 複数の形状判定で使い回す補助データと計算関数
+// 2. KdCollider 本体: 登録済み形状の振り分けと共通インターフェース
+// 3. 各 Collision クラス: 形状ごとの実際の当たり判定処理
 namespace
 {
+	// ほぼ 0 とみなす閾値。
+	// 正規化や距離比較で極小値をそのまま使うと不安定になりやすいため、
+	// 「長さが十分にあるか」の判定に共通で使う。
 	constexpr float kCapsuleEpsilon = 0.0001f;
+
+	// SAT(分離軸定理) 用の微小値。
+	// 浮動小数誤差で「ほぼ接している」状態が不安定にならないようにする。
 	constexpr float kSatEpsilon = 0.0001f;
+
+	// カプセルの押し戻しを一度で終えず、最大何回まで段階的に解決するか。
 	constexpr int kCapsuleSolveIteration = 4;
+
+	// カプセルを複数球へ分解する時の最大サンプル数。
+	// 精度を上げすぎて極端に重くならないよう上限を設けている。
 	constexpr int kMaxCapsuleSampleCount = 16;
+
+	// AABB を OBB と同じ処理で扱う時に使う単位クォータニオン。
 	const Math::Vector4 kIdentityQuaternion(0.0f, 0.0f, 0.0f, 1.0f);
 
+	// 実際の判定に使いやすい形へ展開したカプセル情報。
+	// center / up / start / end が決まっていると、球・箱・カプセルとの判定を共通化しやすい。
 	struct CapsuleShapeData
 	{
 		Math::Vector3 m_center = Math::Vector3::Zero;
@@ -22,12 +41,16 @@ namespace
 		float m_broadRadius = 0.0f;
 	};
 
+	// カプセルを縦方向に並ぶ複数球へ分解した時の中心群。
+	// メッシュや BOX との詳細判定で使い、カプセル専用の低レベル判定を持たない処理を補う。
 	struct CapsuleSamplePoints
 	{
 		std::array<Math::Vector3, kMaxCapsuleSampleCount> m_centers = {};
 		int m_count = 0;
 	};
 
+	// 球と BOX の最近接情報をまとめた中間結果。
+	// まずこの形で情報を揃えておくことで、AABB / OBB の両方を同じ後処理で扱える。
 	struct SphereBoxContact
 	{
 		Math::Vector3 m_nearestPos = Math::Vector3::Zero;
@@ -36,6 +59,7 @@ namespace
 		bool m_isInside = false;
 	};
 
+	// モデル判定で、各衝突メッシュに対して毎回再計算したくない情報をまとめたキャッシュ。
 	struct ModelCollisionCache
 	{
 		const KdMesh* m_mesh = nullptr;
@@ -43,6 +67,8 @@ namespace
 		DirectX::BoundingBox m_aabb = {};
 	};
 
+	// 与えられた方向ベクトルが使えない時、順番に代替候補を試して
+	// 「結果として必ず正規化済みの向きが 1 本返る」ようにする補助関数。
 	Math::Vector3 NormalizeOrFallback(Math::Vector3 dir, const Math::Vector3& fallback1, const Math::Vector3& fallback2, const Math::Vector3& fallback3)
 	{
 		if (dir.LengthSquared() > kCapsuleEpsilon)
@@ -75,11 +101,15 @@ namespace
 		return Math::Vector3::Up;
 	}
 
+	// 負の値を 0 に丸める。
+	// 半径や長さのように、本来マイナスであってはいけない値を安全側へ寄せるために使う。
 	float ClampNonNegative(float value)
 	{
 		return (value < 0.0f) ? 0.0f : value;
 	}
 
+	// 点から線分への最近接点を返す。
+	// カプセルは「線分 + 半径」とみなせるため、球やカプセルとの距離判定の基礎になる。
 	Math::Vector3 ClosestPointOnSegment(const Math::Vector3& point, const Math::Vector3& start, const Math::Vector3& end)
 	{
 		Math::Vector3 segment = end - start;
@@ -96,6 +126,7 @@ namespace
 		return start + segment * t;
 	}
 
+	// 低レベルのメッシュ判定結果を KdCollider の共通結果へ写す。
 	void CopyCollisionMeshResult(const CollisionMeshResult& src, KdCollider::CollisionResult& dst)
 	{
 		dst.m_hitPos = src.m_hitPos;
@@ -104,6 +135,8 @@ namespace
 		dst.m_overlapDistance = src.m_overlapDistance;
 	}
 
+	// 既に完成している衝突結果をコピーしつつ、
+	// 必要なら向きだけ反転して「呼び出し側の規約」に合わせる。
 	void CopyCollisionResult(const KdCollider::CollisionResult& src, KdCollider::CollisionResult& dst, bool invertDirection)
 	{
 		dst = src;
@@ -115,6 +148,8 @@ namespace
 		}
 	}
 
+	// 「中心同士の直線距離で考えられる形状」のヒット結果を共通の式で埋める。
+	// 球 vs 球やカプセル端点ベースの判定で、押し出し方向と重なり量の作り方を統一するために使う。
 	void FillLinearHitResult(
 		const Math::Vector3& basePos,
 		float baseRadius,
@@ -134,6 +169,8 @@ namespace
 		outResult.m_hitNDir = outResult.m_hitDir;
 	}
 
+	// カプセルの基本情報から、中心軸や両端点など
+	// 以降の判定処理が直接使う形へ展開する。
 	CapsuleShapeData BuildCapsuleShapeData(
 		const Math::Vector3& center,
 		Math::Vector3 upAxis,
@@ -147,6 +184,8 @@ namespace
 
 		if (upScale <= kCapsuleEpsilon || upAxis.LengthSquared() <= kCapsuleEpsilon)
 		{
+			// 軸情報が壊れている時は Y 軸上向きを仮採用し、
+			// 少なくとも「高さ方向を持つカプセル」として扱えるようにする。
 			result.m_up = Math::Vector3::Up;
 			upScale = 1.0f;
 		}
@@ -177,6 +216,8 @@ namespace
 		return result;
 	}
 
+	// 登録側カプセルに所有者のワールド行列を適用し、
+	// 実際にワールド空間へ置かれたカプセル形状を作る。
 	CapsuleShapeData BuildCapsuleShapeData(const KdCollider::CapsuleInfo& capsule, const Math::Matrix& world)
 	{
 		const Math::Vector3 center = Math::Vector3::Transform(capsule.m_pos + capsule.m_offset, world);
@@ -186,12 +227,15 @@ namespace
 		const float backwardScale = world.Backward().Length();
 		if (backwardScale > radiusScale)
 		{
+			// X/Z のうち太い方を半径スケールに使い、
+			// 非等方スケール時でもカプセルが細くなりすぎないようにする。
 			radiusScale = backwardScale;
 		}
 
 		return BuildCapsuleShapeData(center, upAxis, upScale, radiusScale, capsule.m_height, capsule.m_radius);
 	}
 
+	// クエリ側カプセルを、そのままワールド座標にあるものとして展開する。
 	CapsuleShapeData BuildCapsuleShapeData(const KdCollider::CapsuleInfo& capsule)
 	{
 		return BuildCapsuleShapeData(
@@ -204,12 +248,15 @@ namespace
 		);
 	}
 
+	// カプセルを複数の球中心へ分解する。
+	// 低レベルの「球 vs 何か」判定を再利用したい時の近似表現として使う。
 	CapsuleSamplePoints BuildCapsuleSamplePoints(const CapsuleShapeData& capsule)
 	{
 		CapsuleSamplePoints result;
 
 		if (capsule.m_cylinderLength <= kCapsuleEpsilon)
 		{
+			// 高さがほぼ直径しかないカプセルは、実質球として 1 サンプルで十分。
 			result.m_centers[0] = capsule.m_center;
 			result.m_count = 1;
 			return result;
@@ -221,6 +268,7 @@ namespace
 			sampleStep = capsule.m_cylinderLength;
 		}
 
+		// 半径の半分程度の間隔で球を並べると、精度とコストのバランスがよい。
 		result.m_count = static_cast<int>(std::ceil(capsule.m_cylinderLength / sampleStep)) + 1;
 		result.m_count = std::clamp(result.m_count, 2, kMaxCapsuleSampleCount);
 
@@ -234,6 +282,8 @@ namespace
 		return result;
 	}
 
+	// カプセル全体をざっくり包む球を作る。
+	// 詳細判定前のブロードフェイズで「明らかに遠い相手」を素早く除外するために使う。
 	DirectX::BoundingSphere BuildBroadSphere(const CapsuleShapeData& capsule)
 	{
 		DirectX::BoundingSphere result;
@@ -242,6 +292,8 @@ namespace
 		return result;
 	}
 
+	// 球と BOX の最近接点・押し出し方向・重なり量を求める。
+	// 外側から当たった場合と、球が BOX の内側にいる場合とで処理を分けている。
 	bool ComputeSphereBoxContact(
 		const Math::Vector3& sphereCenter,
 		float sphereRadius,
@@ -263,6 +315,7 @@ namespace
 
 		if (!isInside)
 		{
+			// 外側にいる時は、球中心を BOX 内へクランプした点が最近接点になる。
 			const Math::Vector3 nearestLocal(
 				std::clamp(localCenter.x, -boxExtents.x, boxExtents.x),
 				std::clamp(localCenter.y, -boxExtents.y, boxExtents.y),
@@ -282,6 +335,8 @@ namespace
 			return true;
 		}
 
+		// 内側にいる時は「最も近い面へどちらに抜けるか」を探し、
+		// 最短で外へ出せる向きと距離を返す。
 		float nearestFaceDist = localCenter.x + boxExtents.x;
 		Math::Vector3 hitDirLocal(-1.0f, 0.0f, 0.0f);
 		Math::Vector3 nearestLocal(-boxExtents.x, localCenter.y, localCenter.z);
@@ -338,6 +393,8 @@ namespace
 		return true;
 	}
 
+	// カプセル vs BOX を、複数球サンプルに分解した近似で解く。
+	// 一度に全補正を加えると押し戻しが暴れやすいため、最も強い補正だけを数回反復適用する。
 	bool ResolveCapsuleVsBox(
 		const CapsuleShapeData& capsule,
 		const CapsuleSamplePoints& samples,
@@ -355,6 +412,7 @@ namespace
 
 		for (int solve = 0; solve < kCapsuleSolveIteration; ++solve)
 		{
+			// 今の押し戻し後の位置で最も深くめり込んでいるサンプル球を探す。
 			bool hitThisSolve = false;
 			Math::Vector3 bestCorrection = Math::Vector3::Zero;
 			Math::Vector3 bestHitPos = Math::Vector3::Zero;
@@ -409,6 +467,8 @@ namespace
 
 		if (pRes && isHit)
 		{
+			// totalCorrection は「実際にカプセルをどちらへ動かしたか」なので、
+			// 返却規約に合わせて hitDir には逆向きを採用する。
 			pRes->m_overlapDistance = totalCorrection.Length();
 			pRes->m_hitDir = NormalizeOrFallback(-totalCorrection, hitNDir, fallback1, fallback2);
 			pRes->m_hitPos = hitPos;
@@ -418,6 +478,8 @@ namespace
 		return isHit;
 	}
 
+	// OBB のローカル X/Y/Z 軸をワールド空間へ展開する。
+	// SAT では箱の各軸がそのまま候補分離軸になる。
 	void BuildObbAxes(const DirectX::BoundingOrientedBox& box, Math::Vector3 outAxes[3])
 	{
 		const Math::Vector4 quat(box.Orientation);
@@ -430,6 +492,8 @@ namespace
 		outAxes[2].Normalize();
 	}
 
+	// 指定方向へ最も張り出した OBB 上の点を返す。
+	// 接触位置をざっくり出したい時の「サポート点」として使う。
 	Math::Vector3 GetSupportPoint(const DirectX::BoundingOrientedBox& box, const Math::Vector3 axes[3], const Math::Vector3& dir)
 	{
 		Math::Vector3 support = box.Center;
@@ -444,6 +508,8 @@ namespace
 		return support;
 	}
 
+	// AABB を回転なし OBB として扱える形へ変換する。
+	// BOX vs BOX の詳細結果は OBB ベースの共通処理へ寄せているため、その前準備として使う。
 	DirectX::BoundingOrientedBox MakeObbFromAabb(const DirectX::BoundingBox& box)
 	{
 		DirectX::BoundingOrientedBox result;
@@ -451,6 +517,8 @@ namespace
 		return result;
 	}
 
+	// OBB 同士の重なりから、最小押し出し方向と重なり量を SAT で求める。
+	// 判定だけでなく「どちらへどれだけ押し出すか」を返すのが主目的。
 	bool ComputeBoxPenetrationResult(
 		const DirectX::BoundingOrientedBox& myBox,
 		const DirectX::BoundingOrientedBox& targetBox,
@@ -488,6 +556,8 @@ namespace
 		float minOverlap = FLT_MAX;
 		Math::Vector3 bestAxis = Math::Vector3::Zero;
 
+		// 候補軸ごとに重なり量を見て、最も小さい軸を最終結果として採用する。
+		// 1 本でも分離軸が見つかれば、そもそも衝突していない。
 		auto updateBestAxis = [&](Math::Vector3 axis, float overlap)
 		{
 			if (overlap < 0.0f)
@@ -515,6 +585,7 @@ namespace
 			return true;
 		};
 
+		// 候補 1: 自分の 3 軸
 		for (int i = 0; i < 3; ++i)
 		{
 			const float ra = myExtents[i];
@@ -531,6 +602,7 @@ namespace
 			}
 		}
 
+		// 候補 2: 相手の 3 軸
 		for (int j = 0; j < 3; ++j)
 		{
 			const float ra =
@@ -550,6 +622,8 @@ namespace
 			}
 		}
 
+		// 候補 3: 各軸の外積で得られる 9 軸
+		// エッジ同士の食い込みはこの候補を見ないと拾えない。
 		for (int i = 0; i < 3; ++i)
 		{
 			for (int j = 0; j < 3; ++j)
@@ -588,6 +662,8 @@ namespace
 		return true;
 	}
 
+	// 2 本の線分の最近接点同士を求める。
+	// カプセル vs カプセルは「中心線分同士の最短距離」が分かれば判定できる。
 	void ClosestPointsBetweenSegments(
 		const Math::Vector3& start1,
 		const Math::Vector3& end1,
@@ -652,6 +728,8 @@ namespace
 		outPoint2 = start2 + d2 * t;
 	}
 
+	// 登録済み形状を総当たりし、対象 type に合うものだけへ判定を委譲する共通関数。
+	// 結果リストが不要なら最初の HIT で即 return し、余計な計算を避ける。
 	template <class HitTest>
 	bool IntersectsRegisteredShapes(
 		const std::unordered_map<std::string, std::unique_ptr<KdCollisionShape>>& collisionShapes,
@@ -672,6 +750,7 @@ namespace
 			KdCollisionShape* shape = collisionShapePair.second.get();
 			if (!shape) { continue; }
 
+			// type が噛み合わない形状は、この問い合わせの対象外。
 			if (!(targetType & shape->GetType()))
 			{
 				continue;
@@ -806,6 +885,7 @@ bool KdCollider::Intersects(const BoxInfo& targetShape, const Math::Matrix& owne
 		pResults,
 		[&](KdCollisionShape& shape, KdCollider::CollisionResult* pTmpRes)
 		{
+			// 呼び出し側の BOX 種別に応じて、AABB / OBB のどちらの仮想関数へ流すかを切り替える。
 			if (targetShape.CheckBoxType(BoxInfo::BoxType::BoxAABB))
 			{
 				return shape.Intersects(targetShape.m_Abox, ownerMatrix, pTmpRes);
@@ -918,6 +998,7 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingSphere& target, const 
 {
 	if (!m_enable) { return false; }
 
+	// 登録時のローカル球を、所有者の現在のワールド位置へ変換する。
 	DirectX::BoundingSphere myShape;
 	m_shape.Transform(myShape, world);
 
@@ -954,6 +1035,7 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingBox& target, const Mat
 {
 	if (!m_enable) { return false; }
 
+	// 登録側球をワールド空間へ出してから対象 BOX と判定する。
 	DirectX::BoundingSphere myShape;
 	m_shape.Transform(myShape, world);
 
@@ -966,6 +1048,7 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingBox& target, const Mat
 	// 当たった時のみ計算
 	if (isHit)
 	{
+		// 詳細結果は「球中心に最も近い BOX 上の点」を基準に作る。
 		SphereBoxContact contact;
 		ComputeSphereBoxContact(
 			myShape.Center,
@@ -997,6 +1080,7 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingOrientedBox& target, c
 {
 	if (!m_enable) { return false; }
 
+	// 登録側球をワールド空間へ出してから対象 OBB と判定する。
 	DirectX::BoundingSphere myShape;
 	m_shape.Transform(myShape, world);
 
@@ -1009,6 +1093,7 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingOrientedBox& target, c
 	// 当たった時のみ計算
 	if (isHit)
 	{
+		// OBB でも詳細計算自体は共通関数へ寄せ、向きだけクォータニオンで扱う。
 		SphereBoxContact contact;
 		ComputeSphereBoxContact(
 			myShape.Center,
@@ -1039,6 +1124,7 @@ bool KdSphereCollision::Intersects(const KdCollider::RayInfo& target, const Math
 {
 	if (!m_enable) { return false; }
 
+	// 登録側球をワールド空間へ出してから、レイとの交差距離を求める。
 	DirectX::BoundingSphere myShape;
 	m_shape.Transform(myShape, world);
 
@@ -1075,6 +1161,7 @@ bool KdSphereCollision::Intersects(const KdCollider::CapsuleInfo& target, const 
 {
 	if (!m_enable) { return false; }
 
+	// 登録側球をワールド空間へ出し、その後はカプセル側実装へ処理を寄せる。
 	DirectX::BoundingSphere myShape;
 	m_shape.Transform(myShape, world);
 
@@ -1114,6 +1201,7 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingSphere& target, const Mat
 
 	if (!m_IsOriented)
 	{
+		// AABB 登録時は AABB のまま判定し、必要な時だけ詳細結果を作る。
 		DirectX::BoundingBox myShape;
 		m_Abox.Transform(myShape, world);
 		isHit = myShape.Intersects(target);
@@ -1135,6 +1223,7 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingSphere& target, const Mat
 	}
 	else
 	{
+		// OBB 登録時は姿勢込みでワールド空間へ展開する。
 		DirectX::BoundingOrientedBox myShape;
 		m_Obox.Transform(myShape, world);
 		isHit = myShape.Intersects(target);
@@ -1173,6 +1262,7 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingBox& target, const Math::
 {
 	if (!m_enable) { return false; }
 
+	// 最終的な詳細結果は OBB ベースの SAT に寄せるため、まず登録形状を OBB へ揃える。
 	DirectX::BoundingOrientedBox myBox;
 	bool isHit = false;
 
@@ -1203,6 +1293,7 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingOrientedBox& target, cons
 {
 	if (!m_enable) { return false; }
 
+	// 対象が既に OBB なので、登録側だけ必要に応じて OBB へ揃える。
 	DirectX::BoundingOrientedBox myBox;
 	bool isHit = false;
 
@@ -1233,6 +1324,8 @@ bool KdBoxCollision::Intersects(const KdCollider::RayInfo& target, const Math::M
 {
 	if (!m_enable) { return false; }
 
+	// 現状は「当たったかどうか」だけを返す実装で、
+	// 詳細結果は使っていないため引数名も省略されている。
 	float hitDistance = FLT_MAX;
 	bool isHit = false;
 
@@ -1264,6 +1357,7 @@ bool KdBoxCollision::Intersects(const KdCollider::CapsuleInfo& target, const Mat
 {
 	if (!m_enable) { return false; }
 
+	// クエリ側カプセルはワールド空間にある前提で、そのまま補助表現へ変換する。
 	const CapsuleShapeData capsule = BuildCapsuleShapeData(target);
 	const CapsuleSamplePoints samples = BuildCapsuleSamplePoints(capsule);
 
@@ -1275,6 +1369,8 @@ bool KdBoxCollision::Intersects(const KdCollider::CapsuleInfo& target, const Mat
 	{
 		DirectX::BoundingBox myShape;
 		m_Abox.Transform(myShape, world);
+
+		// カプセル全体を包む球で一度落としてから詳細判定に進む。
 		if (!myShape.Intersects(BuildBroadSphere(capsule)))
 		{
 			return false;
@@ -1295,6 +1391,8 @@ bool KdBoxCollision::Intersects(const KdCollider::CapsuleInfo& target, const Mat
 	{
 		DirectX::BoundingOrientedBox myShape;
 		m_Obox.Transform(myShape, world);
+
+		// OBB 側も同様にブロードフェイズで明らかな不一致を先に除外する。
 		if (!myShape.Intersects(BuildBroadSphere(capsule)))
 		{
 			return false;
@@ -1637,6 +1735,8 @@ bool KdPolygonCollision::Intersects(const DirectX::BoundingSphere& target, const
 	CollisionMeshResult result;
 	CollisionMeshResult* pTmpResult = pRes ? &result : nullptr;
 
+	// 実際のポリゴン判定は低レベル関数へ委譲し、
+	// ここでは有効判定と結果コピーだけを担当する。
 	// メッシュと球形の当たり判定実行
 	if (!PolygonsIntersect(*m_shape, target, world, pTmpResult))
 	{
@@ -1687,6 +1787,7 @@ bool KdPolygonCollision::Intersects(const KdCollider::RayInfo& target, const Mat
 	CollisionMeshResult result;
 	CollisionMeshResult* pTmpResult = pRes ? &result : nullptr;
 
+	// レイ版も球版と同じく、ポリゴン側の共通判定関数を薄く包んでいる。
 	if (!PolygonsIntersect(*m_shape, target.m_pos, target.m_dir, target.m_range, world, pTmpResult))
 	{
 		// 当たっていなければ無条件に返る
@@ -1725,6 +1826,7 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingSphere& target, const
 	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
 	if (!m_enable || !m_shape) { return false; }
 
+	// カプセルは「線分 + 半径」なので、まず球中心に最も近い線分上の点を求める。
 	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
 	const Math::Vector3 closestPos = ClosestPointOnSegment(Math::Vector3(target.Center), capsule.m_start, capsule.m_end);
 	const Math::Vector3 capsuleToTarget = Math::Vector3(target.Center) - closestPos;
@@ -1761,6 +1863,7 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingBox& target, const Ma
 	if (!m_enable || !m_shape) { return false; }
 
 	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
+	// カプセル全体を包む球で先に落とし、重いサンプル判定を減らす。
 	if (!target.Intersects(BuildBroadSphere(capsule)))
 	{
 		return false;
@@ -1787,6 +1890,7 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingOrientedBox& target, 
 	if (!m_enable || !m_shape) { return false; }
 
 	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
+	// OBB 相手でもブロードフェイズは同じ考え方で行える。
 	if (!target.Intersects(BuildBroadSphere(capsule)))
 	{
 		return false;
@@ -1821,6 +1925,7 @@ bool KdCapsuleCollision::Intersects(const KdCollider::CapsuleInfo& target, const
 {
 	if (!m_enable || !m_shape) { return false; }
 
+	// まず両カプセルを「中心線分 + 半径」の形へ展開する。
 	const CapsuleShapeData myCapsule = BuildCapsuleShapeData(*m_shape, world);
 	const CapsuleShapeData targetCapsule = BuildCapsuleShapeData(target);
 
@@ -1835,6 +1940,7 @@ bool KdCapsuleCollision::Intersects(const KdCollider::CapsuleInfo& target, const
 		targetClosest
 	);
 
+	// 中心線分同士の最近接点間距離が、半径の合計以下なら衝突している。
 	const Math::Vector3 hitVec = targetClosest - myClosest;
 	const float needDistance = myCapsule.m_radius + targetCapsule.m_radius;
 	const bool isHit = hitVec.LengthSquared() <= needDistance * needDistance;
