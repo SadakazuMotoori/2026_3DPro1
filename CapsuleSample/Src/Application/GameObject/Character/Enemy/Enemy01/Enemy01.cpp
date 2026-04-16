@@ -16,8 +16,8 @@ void Enemy01::Init()
 	//	m_pCollider->RegisterCollisionShape("Enemy", m_spModel, KdCollider::TypeBump);
 	 
 		// カプセル登録
-	//	KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
-	//	m_pCollider->RegisterCollisionShape("Enemy", _cpInfo);
+		KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
+		m_pCollider->RegisterCollisionShape("Enemy", _cpInfo);
 
 		// 球登録
 	//	DirectX::BoundingSphere _info({ 0.0f, 1.0f, 0.0f }, 0.5f);
@@ -29,10 +29,10 @@ void Enemy01::Init()
 	//	m_pCollider->RegisterCollisionShape("Enemy", _boxInfo, KdCollider::TypeBump);
 
 		// BOX(OBB)登録
-		Math::Vector3 _center = GetPos() + Math::Vector3(0, 0.5f, 0);
-		Math::Quaternion _qat = Math::Quaternion::CreateFromRotationMatrix(Math::Matrix::CreateRotationY(DirectX::XMConvertToRadians(45)));
-		DirectX::BoundingOrientedBox _boxInfo(_center, { 0.5f, 0.5f, 0.5f }, _qat);
-		m_pCollider->RegisterCollisionShape("Enemy", _boxInfo, KdCollider::TypeBump);
+	//	Math::Vector3 _center = GetPos() + Math::Vector3(0, 0.5f, 0);
+	//	Math::Quaternion _qat = Math::Quaternion::CreateFromRotationMatrix(Math::Matrix::CreateRotationY(DirectX::XMConvertToRadians(45)));
+	//	DirectX::BoundingOrientedBox _boxInfo(_center, { 0.5f, 0.5f, 0.5f }, _qat);
+	//	m_pCollider->RegisterCollisionShape("Enemy", _boxInfo, KdCollider::TypeBump);
 	}
 
 	SetPos({ 2, 0, 5 });
@@ -42,7 +42,7 @@ void Enemy01::Update()
 {
 	m_Gravity += 0.01f;
 	m_mWorld._42 -= m_Gravity;
-	m_mWorld._43 += 0.01f;
+//	m_mWorld._43 += 0.01f;
 	m_worldPos = GetPos();
 
 	CharacterBase::Update();
@@ -54,12 +54,12 @@ void Enemy01::PreDraw()
 //	m_pDebugWire->AddDebugSphere(GetMatrix().Translation() + Math::Vector3(0.0f, 1.0f, 0.0f), 0.5f);
 
  	// カプセルデバッグワイヤーの描画
-//	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.7f,0 }, 1.5f, 0.3f);
+	m_pDebugWire->AddDebugCapsule(GetMatrix(), { 0,0.7f,0 }, 1.5f, 0.3f);
 
 	// BOX(AABB)デバッグワイヤーの描画
 //	m_pDebugWire->AddDebugBox(GetMatrix(), {0.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f });
 
 	// BOX(OBB)デバッグワイヤーの描画
-	Math::Matrix _mat = Math::Matrix::CreateRotationY(DirectX::XMConvertToRadians(45)) * Math::Matrix::CreateTranslation(GetPos());
-	m_pDebugWire->AddDebugBox(_mat, {0.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f },true);
+//	Math::Matrix _mat = Math::Matrix::CreateRotationY(DirectX::XMConvertToRadians(45)) * Math::Matrix::CreateTranslation(GetPos());
+//	m_pDebugWire->AddDebugBox(_mat, {0.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f },true);
 }

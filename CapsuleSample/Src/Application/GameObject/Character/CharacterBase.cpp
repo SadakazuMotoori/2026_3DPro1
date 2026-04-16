@@ -161,7 +161,7 @@ void CharacterBase::UpdateCollision()
 		}
 	}
 */
-/*
+
 	// その他カプセルによる衝突判定
 	if (!m_IsPlayer) return;
 	// ----- ----- ----- ----- -----
@@ -185,7 +185,7 @@ void CharacterBase::UpdateCollision()
 			}
 		}
 	}
-*/
+/*
 	// その他BOXによる衝突判定
 	if (!m_IsPlayer) return;
 	// ----- ----- ----- ----- -----
@@ -209,6 +209,7 @@ void CharacterBase::UpdateCollision()
 			}
 		}
 	}
+*/
 }
 
 void CharacterBase::UpdateAnimation()

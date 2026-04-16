@@ -1,8 +1,47 @@
 ﻿#include "KdCollider.h"
 
+#include <array>
+
 namespace
 {
 	constexpr float kCapsuleEpsilon = 0.0001f;
+	constexpr float kSatEpsilon = 0.0001f;
+	constexpr int kCapsuleSolveIteration = 4;
+	constexpr int kMaxCapsuleSampleCount = 16;
+	const Math::Vector4 kIdentityQuaternion(0.0f, 0.0f, 0.0f, 1.0f);
+
+	struct CapsuleShapeData
+	{
+		Math::Vector3 m_center = Math::Vector3::Zero;
+		Math::Vector3 m_up = Math::Vector3::Up;
+		Math::Vector3 m_start = Math::Vector3::Zero;
+		Math::Vector3 m_end = Math::Vector3::Zero;
+		float m_radius = 0.0f;
+		float m_height = 0.0f;
+		float m_cylinderLength = 0.0f;
+		float m_broadRadius = 0.0f;
+	};
+
+	struct CapsuleSamplePoints
+	{
+		std::array<Math::Vector3, kMaxCapsuleSampleCount> m_centers = {};
+		int m_count = 0;
+	};
+
+	struct SphereBoxContact
+	{
+		Math::Vector3 m_nearestPos = Math::Vector3::Zero;
+		Math::Vector3 m_hitDir = Math::Vector3::Zero;
+		float m_overlapDistance = 0.0f;
+		bool m_isInside = false;
+	};
+
+	struct ModelCollisionCache
+	{
+		const KdMesh* m_mesh = nullptr;
+		Math::Matrix m_world = Math::Matrix::Identity;
+		DirectX::BoundingBox m_aabb = {};
+	};
 
 	Math::Vector3 NormalizeOrFallback(Math::Vector3 dir, const Math::Vector3& fallback1, const Math::Vector3& fallback2, const Math::Vector3& fallback3)
 	{
@@ -36,6 +75,11 @@ namespace
 		return Math::Vector3::Up;
 	}
 
+	float ClampNonNegative(float value)
+	{
+		return (value < 0.0f) ? 0.0f : value;
+	}
+
 	Math::Vector3 ClosestPointOnSegment(const Math::Vector3& point, const Math::Vector3& start, const Math::Vector3& end)
 	{
 		Math::Vector3 segment = end - start;
@@ -51,6 +95,607 @@ namespace
 
 		return start + segment * t;
 	}
+
+	void CopyCollisionMeshResult(const CollisionMeshResult& src, KdCollider::CollisionResult& dst)
+	{
+		dst.m_hitPos = src.m_hitPos;
+		dst.m_hitDir = src.m_hitDir;
+		dst.m_hitNDir = src.m_hitNDir;
+		dst.m_overlapDistance = src.m_overlapDistance;
+	}
+
+	void CopyCollisionResult(const KdCollider::CollisionResult& src, KdCollider::CollisionResult& dst, bool invertDirection)
+	{
+		dst = src;
+
+		if (invertDirection)
+		{
+			dst.m_hitDir *= -1.0f;
+			dst.m_hitNDir *= -1.0f;
+		}
+	}
+
+	void FillLinearHitResult(
+		const Math::Vector3& basePos,
+		float baseRadius,
+		const Math::Vector3& targetPos,
+		float needDistance,
+		KdCollider::CollisionResult& outResult,
+		const Math::Vector3& fallback1,
+		const Math::Vector3& fallback2,
+		const Math::Vector3& fallback3)
+	{
+		const Math::Vector3 hitVec = targetPos - basePos;
+		const float betweenDistance = hitVec.Length();
+
+		outResult.m_hitDir = NormalizeOrFallback(hitVec, fallback1, fallback2, fallback3);
+		outResult.m_overlapDistance = needDistance - betweenDistance;
+		outResult.m_hitPos = basePos + outResult.m_hitDir * (baseRadius + outResult.m_overlapDistance * 0.5f);
+		outResult.m_hitNDir = outResult.m_hitDir;
+	}
+
+	CapsuleShapeData BuildCapsuleShapeData(
+		const Math::Vector3& center,
+		Math::Vector3 upAxis,
+		float upScale,
+		float radiusScale,
+		float height,
+		float radius)
+	{
+		CapsuleShapeData result;
+		result.m_center = center;
+
+		if (upScale <= kCapsuleEpsilon || upAxis.LengthSquared() <= kCapsuleEpsilon)
+		{
+			result.m_up = Math::Vector3::Up;
+			upScale = 1.0f;
+		}
+		else
+		{
+			result.m_up = upAxis;
+			result.m_up.Normalize();
+		}
+
+		if (radiusScale <= kCapsuleEpsilon)
+		{
+			radiusScale = 1.0f;
+		}
+
+		result.m_radius = ClampNonNegative(radius) * radiusScale;
+		result.m_height = ClampNonNegative(height) * upScale;
+		if (result.m_height < result.m_radius * 2.0f)
+		{
+			// 高さが直径より小さい時は、潰れたカプセルではなく球として扱える最小サイズへ丸める
+			result.m_height = result.m_radius * 2.0f;
+		}
+
+		result.m_cylinderLength = result.m_height - result.m_radius * 2.0f;
+		result.m_start = result.m_center - result.m_up * (result.m_cylinderLength * 0.5f);
+		result.m_end = result.m_center + result.m_up * (result.m_cylinderLength * 0.5f);
+		result.m_broadRadius = result.m_radius + result.m_cylinderLength * 0.5f;
+
+		return result;
+	}
+
+	CapsuleShapeData BuildCapsuleShapeData(const KdCollider::CapsuleInfo& capsule, const Math::Matrix& world)
+	{
+		const Math::Vector3 center = Math::Vector3::Transform(capsule.m_pos + capsule.m_offset, world);
+		const Math::Vector3 upAxis = world.Up();
+		const float upScale = upAxis.Length();
+		float radiusScale = world.Right().Length();
+		const float backwardScale = world.Backward().Length();
+		if (backwardScale > radiusScale)
+		{
+			radiusScale = backwardScale;
+		}
+
+		return BuildCapsuleShapeData(center, upAxis, upScale, radiusScale, capsule.m_height, capsule.m_radius);
+	}
+
+	CapsuleShapeData BuildCapsuleShapeData(const KdCollider::CapsuleInfo& capsule)
+	{
+		return BuildCapsuleShapeData(
+			capsule.m_pos + capsule.m_offset,
+			Math::Vector3::Up,
+			1.0f,
+			1.0f,
+			capsule.m_height,
+			capsule.m_radius
+		);
+	}
+
+	CapsuleSamplePoints BuildCapsuleSamplePoints(const CapsuleShapeData& capsule)
+	{
+		CapsuleSamplePoints result;
+
+		if (capsule.m_cylinderLength <= kCapsuleEpsilon)
+		{
+			result.m_centers[0] = capsule.m_center;
+			result.m_count = 1;
+			return result;
+		}
+
+		float sampleStep = capsule.m_radius * 0.5f;
+		if (sampleStep <= kCapsuleEpsilon)
+		{
+			sampleStep = capsule.m_cylinderLength;
+		}
+
+		result.m_count = static_cast<int>(std::ceil(capsule.m_cylinderLength / sampleStep)) + 1;
+		result.m_count = std::clamp(result.m_count, 2, kMaxCapsuleSampleCount);
+
+		const Math::Vector3 capsuleAxis = capsule.m_end - capsule.m_start;
+		for (int i = 0; i < result.m_count; ++i)
+		{
+			const float t = static_cast<float>(i) / static_cast<float>(result.m_count - 1);
+			result.m_centers[i] = capsule.m_start + capsuleAxis * t;
+		}
+
+		return result;
+	}
+
+	DirectX::BoundingSphere BuildBroadSphere(const CapsuleShapeData& capsule)
+	{
+		DirectX::BoundingSphere result;
+		result.Center = capsule.m_center;
+		result.Radius = capsule.m_broadRadius;
+		return result;
+	}
+
+	bool ComputeSphereBoxContact(
+		const Math::Vector3& sphereCenter,
+		float sphereRadius,
+		const Math::Vector3& boxCenter,
+		const Math::Vector3& boxExtents,
+		const Math::Vector4& boxOrientation,
+		const Math::Vector3& fallback1,
+		const Math::Vector3& fallback2,
+		const Math::Vector3& fallback3,
+		SphereBoxContact& outContact)
+	{
+		const Math::Vector3 localCenter = XMVector3InverseRotate(sphereCenter - boxCenter, boxOrientation);
+
+		const bool isInside =
+			(localCenter.x >= -boxExtents.x && localCenter.x <= boxExtents.x) &&
+			(localCenter.y >= -boxExtents.y && localCenter.y <= boxExtents.y) &&
+			(localCenter.z >= -boxExtents.z && localCenter.z <= boxExtents.z);
+		outContact.m_isInside = isInside;
+
+		if (!isInside)
+		{
+			const Math::Vector3 nearestLocal(
+				std::clamp(localCenter.x, -boxExtents.x, boxExtents.x),
+				std::clamp(localCenter.y, -boxExtents.y, boxExtents.y),
+				std::clamp(localCenter.z, -boxExtents.z, boxExtents.z)
+			);
+
+			const Math::Vector3 toBoxLocal = nearestLocal - localCenter;
+			const float distSqr = toBoxLocal.LengthSquared();
+			if (distSqr > sphereRadius * sphereRadius)
+			{
+				return false;
+			}
+
+			outContact.m_nearestPos = Math::Vector3(XMVector3Rotate(nearestLocal, boxOrientation)) + boxCenter;
+			outContact.m_hitDir = NormalizeOrFallback(outContact.m_nearestPos - sphereCenter, fallback1, fallback2, fallback3);
+			outContact.m_overlapDistance = sphereRadius - std::sqrt(distSqr);
+			return true;
+		}
+
+		float nearestFaceDist = localCenter.x + boxExtents.x;
+		Math::Vector3 hitDirLocal(-1.0f, 0.0f, 0.0f);
+		Math::Vector3 nearestLocal(-boxExtents.x, localCenter.y, localCenter.z);
+
+		const float distToMaxX = boxExtents.x - localCenter.x;
+		if (distToMaxX < nearestFaceDist)
+		{
+			nearestFaceDist = distToMaxX;
+			hitDirLocal = Math::Vector3(1.0f, 0.0f, 0.0f);
+			nearestLocal = Math::Vector3(boxExtents.x, localCenter.y, localCenter.z);
+		}
+
+		const float distToMinY = localCenter.y + boxExtents.y;
+		if (distToMinY < nearestFaceDist)
+		{
+			nearestFaceDist = distToMinY;
+			hitDirLocal = Math::Vector3(0.0f, -1.0f, 0.0f);
+			nearestLocal = Math::Vector3(localCenter.x, -boxExtents.y, localCenter.z);
+		}
+
+		const float distToMaxY = boxExtents.y - localCenter.y;
+		if (distToMaxY < nearestFaceDist)
+		{
+			nearestFaceDist = distToMaxY;
+			hitDirLocal = Math::Vector3(0.0f, 1.0f, 0.0f);
+			nearestLocal = Math::Vector3(localCenter.x, boxExtents.y, localCenter.z);
+		}
+
+		const float distToMinZ = localCenter.z + boxExtents.z;
+		if (distToMinZ < nearestFaceDist)
+		{
+			nearestFaceDist = distToMinZ;
+			hitDirLocal = Math::Vector3(0.0f, 0.0f, -1.0f);
+			nearestLocal = Math::Vector3(localCenter.x, localCenter.y, -boxExtents.z);
+		}
+
+		const float distToMaxZ = boxExtents.z - localCenter.z;
+		if (distToMaxZ < nearestFaceDist)
+		{
+			nearestFaceDist = distToMaxZ;
+			hitDirLocal = Math::Vector3(0.0f, 0.0f, 1.0f);
+			nearestLocal = Math::Vector3(localCenter.x, localCenter.y, boxExtents.z);
+		}
+
+		outContact.m_nearestPos = Math::Vector3(XMVector3Rotate(nearestLocal, boxOrientation)) + boxCenter;
+		outContact.m_hitDir = NormalizeOrFallback(
+			Math::Vector3(XMVector3Rotate(hitDirLocal, boxOrientation)),
+			fallback1,
+			fallback2,
+			fallback3
+		);
+		outContact.m_overlapDistance = sphereRadius + nearestFaceDist;
+
+		return true;
+	}
+
+	bool ResolveCapsuleVsBox(
+		const CapsuleShapeData& capsule,
+		const CapsuleSamplePoints& samples,
+		const Math::Vector3& boxCenter,
+		const Math::Vector3& boxExtents,
+		const Math::Vector4& boxOrientation,
+		const Math::Vector3& fallback1,
+		const Math::Vector3& fallback2,
+		KdCollider::CollisionResult* pRes)
+	{
+		bool isHit = false;
+		Math::Vector3 totalCorrection = Math::Vector3::Zero;
+		Math::Vector3 hitPos = Math::Vector3::Zero;
+		Math::Vector3 hitNDir = Math::Vector3::Zero;
+
+		for (int solve = 0; solve < kCapsuleSolveIteration; ++solve)
+		{
+			bool hitThisSolve = false;
+			Math::Vector3 bestCorrection = Math::Vector3::Zero;
+			Math::Vector3 bestHitPos = Math::Vector3::Zero;
+			Math::Vector3 bestHitNDir = Math::Vector3::Zero;
+
+			for (int i = 0; i < samples.m_count; ++i)
+			{
+				const Math::Vector3 sphereCenter = samples.m_centers[i] + totalCorrection;
+
+				SphereBoxContact contact;
+				if (!ComputeSphereBoxContact(
+					sphereCenter,
+					capsule.m_radius,
+					boxCenter,
+					boxExtents,
+					boxOrientation,
+					boxCenter - sphereCenter,
+					fallback1,
+					fallback2,
+					contact))
+				{
+					continue;
+				}
+
+				if (!pRes)
+				{
+					return true;
+				}
+
+				hitThisSolve = true;
+				isHit = true;
+
+				// 実際の分離は「BOX -> カプセル」方向へ行うので、返却規約用の向きを反転して使う
+				const Math::Vector3 correction = contact.m_hitDir * -contact.m_overlapDistance;
+				if (correction.LengthSquared() > bestCorrection.LengthSquared())
+				{
+					bestCorrection = correction;
+					bestHitPos = sphereCenter + contact.m_hitDir * (capsule.m_radius + contact.m_overlapDistance * 0.5f);
+					bestHitNDir = contact.m_hitDir;
+				}
+			}
+
+			if (!hitThisSolve || bestCorrection.LengthSquared() <= kCapsuleEpsilon)
+			{
+				break;
+			}
+
+			totalCorrection += bestCorrection;
+			hitPos = bestHitPos;
+			hitNDir = bestHitNDir;
+		}
+
+		if (pRes && isHit)
+		{
+			pRes->m_overlapDistance = totalCorrection.Length();
+			pRes->m_hitDir = NormalizeOrFallback(-totalCorrection, hitNDir, fallback1, fallback2);
+			pRes->m_hitPos = hitPos;
+			pRes->m_hitNDir = hitNDir;
+		}
+
+		return isHit;
+	}
+
+	void BuildObbAxes(const DirectX::BoundingOrientedBox& box, Math::Vector3 outAxes[3])
+	{
+		const Math::Vector4 quat(box.Orientation);
+		outAxes[0] = Math::Vector3(XMVector3Rotate(Math::Vector3(1.0f, 0.0f, 0.0f), quat));
+		outAxes[1] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 1.0f, 0.0f), quat));
+		outAxes[2] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 0.0f, 1.0f), quat));
+
+		outAxes[0].Normalize();
+		outAxes[1].Normalize();
+		outAxes[2].Normalize();
+	}
+
+	Math::Vector3 GetSupportPoint(const DirectX::BoundingOrientedBox& box, const Math::Vector3 axes[3], const Math::Vector3& dir)
+	{
+		Math::Vector3 support = box.Center;
+		const float extents[3] = { box.Extents.x, box.Extents.y, box.Extents.z };
+
+		for (int i = 0; i < 3; ++i)
+		{
+			const float sign = (DirectX::XMVector3Dot(dir, axes[i]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
+			support += axes[i] * extents[i] * sign;
+		}
+
+		return support;
+	}
+
+	DirectX::BoundingOrientedBox MakeObbFromAabb(const DirectX::BoundingBox& box)
+	{
+		DirectX::BoundingOrientedBox result;
+		DirectX::BoundingOrientedBox::CreateFromBoundingBox(result, box);
+		return result;
+	}
+
+	bool ComputeBoxPenetrationResult(
+		const DirectX::BoundingOrientedBox& myBox,
+		const DirectX::BoundingOrientedBox& targetBox,
+		const Math::Vector3& fallback1,
+		const Math::Vector3& fallback2,
+		KdCollider::CollisionResult& outResult)
+	{
+		Math::Vector3 myAxes[3];
+		Math::Vector3 targetAxes[3];
+		BuildObbAxes(myBox, myAxes);
+		BuildObbAxes(targetBox, targetAxes);
+
+		const float myExtents[3] = { myBox.Extents.x, myBox.Extents.y, myBox.Extents.z };
+		const float targetExtents[3] = { targetBox.Extents.x, targetBox.Extents.y, targetBox.Extents.z };
+		const Math::Vector3 centerDelta = Math::Vector3(targetBox.Center) - Math::Vector3(myBox.Center);
+
+		float t[3] =
+		{
+			DirectX::XMVector3Dot(centerDelta, myAxes[0]).m128_f32[0],
+			DirectX::XMVector3Dot(centerDelta, myAxes[1]).m128_f32[0],
+			DirectX::XMVector3Dot(centerDelta, myAxes[2]).m128_f32[0]
+		};
+
+		float rot[3][3] = {};
+		float absRot[3][3] = {};
+		for (int i = 0; i < 3; ++i)
+		{
+			for (int j = 0; j < 3; ++j)
+			{
+				rot[i][j] = DirectX::XMVector3Dot(myAxes[i], targetAxes[j]).m128_f32[0];
+				absRot[i][j] = fabsf(rot[i][j]) + kSatEpsilon;
+			}
+		}
+
+		float minOverlap = FLT_MAX;
+		Math::Vector3 bestAxis = Math::Vector3::Zero;
+
+		auto updateBestAxis = [&](Math::Vector3 axis, float overlap)
+		{
+			if (overlap < 0.0f)
+			{
+				if (overlap < -kSatEpsilon)
+				{
+					return false;
+				}
+
+				overlap = 0.0f;
+			}
+
+			if (axis.LengthSquared() <= kSatEpsilon)
+			{
+				return true;
+			}
+
+			axis.Normalize();
+			if (overlap < minOverlap)
+			{
+				minOverlap = overlap;
+				bestAxis = axis;
+			}
+
+			return true;
+		};
+
+		for (int i = 0; i < 3; ++i)
+		{
+			const float ra = myExtents[i];
+			const float rb =
+				targetExtents[0] * absRot[i][0] +
+				targetExtents[1] * absRot[i][1] +
+				targetExtents[2] * absRot[i][2];
+
+			const float overlap = ra + rb - fabsf(t[i]);
+			const float sign = (t[i] >= 0.0f) ? 1.0f : -1.0f;
+			if (!updateBestAxis(myAxes[i] * sign, overlap))
+			{
+				return false;
+			}
+		}
+
+		for (int j = 0; j < 3; ++j)
+		{
+			const float ra =
+				myExtents[0] * absRot[0][j] +
+				myExtents[1] * absRot[1][j] +
+				myExtents[2] * absRot[2][j];
+			const float rb = targetExtents[j];
+			const float projectedCenter =
+				t[0] * rot[0][j] +
+				t[1] * rot[1][j] +
+				t[2] * rot[2][j];
+			const float overlap = ra + rb - fabsf(projectedCenter);
+			const float sign = (DirectX::XMVector3Dot(centerDelta, targetAxes[j]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
+			if (!updateBestAxis(targetAxes[j] * sign, overlap))
+			{
+				return false;
+			}
+		}
+
+		for (int i = 0; i < 3; ++i)
+		{
+			for (int j = 0; j < 3; ++j)
+			{
+				const Math::Vector3 axis = myAxes[i].Cross(targetAxes[j]);
+				if (axis.LengthSquared() <= kSatEpsilon)
+				{
+					continue;
+				}
+
+				const float ra =
+					myExtents[(i + 1) % 3] * absRot[(i + 2) % 3][j] +
+					myExtents[(i + 2) % 3] * absRot[(i + 1) % 3][j];
+				const float rb =
+					targetExtents[(j + 1) % 3] * absRot[i][(j + 2) % 3] +
+					targetExtents[(j + 2) % 3] * absRot[i][(j + 1) % 3];
+				const float dist = fabsf(
+					t[(i + 2) % 3] * rot[(i + 1) % 3][j] -
+					t[(i + 1) % 3] * rot[(i + 2) % 3][j]
+				);
+				const float overlap = ra + rb - dist;
+				const float sign = (DirectX::XMVector3Dot(centerDelta, axis).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
+				if (!updateBestAxis(axis * sign, overlap))
+				{
+					return false;
+				}
+			}
+		}
+
+		outResult.m_hitDir = NormalizeOrFallback(bestAxis, centerDelta, fallback1, fallback2);
+		outResult.m_overlapDistance = minOverlap;
+		outResult.m_hitPos =
+			(GetSupportPoint(myBox, myAxes, outResult.m_hitDir) + GetSupportPoint(targetBox, targetAxes, -outResult.m_hitDir)) * 0.5f;
+		outResult.m_hitNDir = outResult.m_hitDir;
+
+		return true;
+	}
+
+	void ClosestPointsBetweenSegments(
+		const Math::Vector3& start1,
+		const Math::Vector3& end1,
+		const Math::Vector3& start2,
+		const Math::Vector3& end2,
+		Math::Vector3& outPoint1,
+		Math::Vector3& outPoint2)
+	{
+		const Math::Vector3 d1 = end1 - start1;
+		const Math::Vector3 d2 = end2 - start2;
+		const Math::Vector3 r = start1 - start2;
+
+		const float a = DirectX::XMVector3Dot(d1, d1).m128_f32[0];
+		const float e = DirectX::XMVector3Dot(d2, d2).m128_f32[0];
+		const float f = DirectX::XMVector3Dot(d2, r).m128_f32[0];
+
+		float s = 0.0f;
+		float t = 0.0f;
+
+		if (a <= kCapsuleEpsilon && e <= kCapsuleEpsilon)
+		{
+			s = 0.0f;
+			t = 0.0f;
+		}
+		else if (a <= kCapsuleEpsilon)
+		{
+			t = std::clamp(f / e, 0.0f, 1.0f);
+		}
+		else
+		{
+			const float c = DirectX::XMVector3Dot(d1, r).m128_f32[0];
+			if (e <= kCapsuleEpsilon)
+			{
+				s = std::clamp(-c / a, 0.0f, 1.0f);
+			}
+			else
+			{
+				const float b = DirectX::XMVector3Dot(d1, d2).m128_f32[0];
+				const float denom = a * e - b * b;
+
+				if (fabsf(denom) > kCapsuleEpsilon)
+				{
+					s = std::clamp((b * f - c * e) / denom, 0.0f, 1.0f);
+				}
+
+				t = (b * s + f) / e;
+
+				if (t < 0.0f)
+				{
+					t = 0.0f;
+					s = std::clamp(-c / a, 0.0f, 1.0f);
+				}
+				else if (t > 1.0f)
+				{
+					t = 1.0f;
+					s = std::clamp((b - c) / a, 0.0f, 1.0f);
+				}
+			}
+		}
+
+		outPoint1 = start1 + d1 * s;
+		outPoint2 = start2 + d2 * t;
+	}
+
+	template <class HitTest>
+	bool IntersectsRegisteredShapes(
+		const std::unordered_map<std::string, std::unique_ptr<KdCollisionShape>>& collisionShapes,
+		UINT targetType,
+		int disableType,
+		std::list<KdCollider::CollisionResult>* pResults,
+		HitTest&& hitTest)
+	{
+		if ((targetType & disableType) || collisionShapes.empty())
+		{
+			return false;
+		}
+
+		bool isHit = false;
+
+		for (const auto& collisionShapePair : collisionShapes)
+		{
+			KdCollisionShape* shape = collisionShapePair.second.get();
+			if (!shape) { continue; }
+
+			if (!(targetType & shape->GetType()))
+			{
+				continue;
+			}
+
+			KdCollider::CollisionResult tmpRes = {};
+			KdCollider::CollisionResult* pTmpRes = pResults ? &tmpRes : nullptr;
+
+			if (!hitTest(*shape, pTmpRes))
+			{
+				continue;
+			}
+
+			if (!pResults)
+			{
+				return true;
+			}
+
+			isHit = true;
+			pResults->emplace_back(tmpRes);
+		}
+
+		return isHit;
+	}
 }
 
 // ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### ##### #####
@@ -64,7 +709,8 @@ void KdCollider::RegisterCollisionShape(std::string_view name, std::unique_ptr<K
 {
 	if (!spShape) { return; }
 
-	m_collisionShapes.emplace(name.data(), std::move(spShape));
+	// string_view::data() は終端保証が無いため、そのままキー化せず明示的に std::string へ詰める
+	m_collisionShapes.emplace(std::string(name), std::move(spShape));
 }
 
 ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -134,31 +780,16 @@ void KdCollider::RegisterCollisionShape(std::string_view name, KdPolygon* polygo
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 bool KdCollider::Intersects(const SphereInfo& targetShape, const Math::Matrix& ownerMatrix, std::list<KdCollider::CollisionResult>* pResults) const
 {
-	// 当たり判定無効のタイプの場合は返る
-	if (targetShape.m_type & m_disableType) { return false; }
-
-	bool isHit = false;
-
-	for (auto& collisionShape : m_collisionShapes)
-	{
-		// 用途が一致していない当たり判定形状はスキップ
-		if (!(targetShape.m_type & collisionShape.second->GetType())) { continue; }
-
-		KdCollider::CollisionResult tmpRes;
-		KdCollider::CollisionResult* pTmpRes = pResults ? &tmpRes : nullptr;
-
-		if (collisionShape.second->Intersects(targetShape.m_sphere, ownerMatrix, pTmpRes))
+	return IntersectsRegisteredShapes(
+		m_collisionShapes,
+		targetShape.m_type,
+		m_disableType,
+		pResults,
+		[&](KdCollisionShape& shape, KdCollider::CollisionResult* pTmpRes)
 		{
-			isHit = true;
-
-			// 詳細な衝突結果を必要としない場合は1つでも接触して返す
-			if (!pResults) { break; }
-
-			pResults->push_back(tmpRes);
+			return shape.Intersects(targetShape.m_sphere, ownerMatrix, pTmpRes);
 		}
-	}
-
-	return isHit;
+	);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -168,33 +799,21 @@ bool KdCollider::Intersects(const SphereInfo& targetShape, const Math::Matrix& o
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 bool KdCollider::Intersects(const BoxInfo& targetShape, const Math::Matrix& ownerMatrix, std::list<KdCollider::CollisionResult>* pResults) const
 {
-	// 当たり判定無効のタイプの場合は返る
-	if (targetShape.m_type & m_disableType) { return false; }
-
-	bool isHit = false;
-
-	for (auto& collisionShape : m_collisionShapes)
-	{
-		// 用途が一致していない当たり判定形状はスキップ
-		if (!(targetShape.m_type & collisionShape.second->GetType())) { continue; }
-
-		KdCollider::CollisionResult tmpRes;
-		KdCollider::CollisionResult* pTmpRes = pResults ? &tmpRes : nullptr;
-
-		bool isIntersects = (targetShape.CheckBoxType(BoxInfo::BoxType::BoxAABB)) ? collisionShape.second->Intersects(targetShape.m_Abox, ownerMatrix, pTmpRes) :
-			collisionShape.second->Intersects(targetShape.m_Obox, ownerMatrix, pTmpRes);
-		if (isIntersects)
+	return IntersectsRegisteredShapes(
+		m_collisionShapes,
+		targetShape.m_type,
+		m_disableType,
+		pResults,
+		[&](KdCollisionShape& shape, KdCollider::CollisionResult* pTmpRes)
 		{
-			isHit = true;
+			if (targetShape.CheckBoxType(BoxInfo::BoxType::BoxAABB))
+			{
+				return shape.Intersects(targetShape.m_Abox, ownerMatrix, pTmpRes);
+			}
 
-			// 詳細な衝突結果を必要としない場合は1つでも接触して返す
-			if (!pResults) { break; }
-
-			pResults->push_back(tmpRes);
+			return shape.Intersects(targetShape.m_Obox, ownerMatrix, pTmpRes);
 		}
-	}
-
-	return isHit;
+	);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -204,9 +823,6 @@ bool KdCollider::Intersects(const BoxInfo& targetShape, const Math::Matrix& owne
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 bool KdCollider::Intersects(const RayInfo& targetShape, const Math::Matrix& ownerMatrix, std::list<KdCollider::CollisionResult>* pResults) const
 {
-	// 当たり判定無効のタイプの場合は返る
-	if (targetShape.m_type & m_disableType) { return false; }
-
 	// レイの方向ベクトルが存在しない場合は判定不能なのでそのまま返る
 	if (!targetShape.m_dir.LengthSquared())
 	{
@@ -215,28 +831,16 @@ bool KdCollider::Intersects(const RayInfo& targetShape, const Math::Matrix& owne
 		return false;
 	}
 
-	bool isHit = false;
-
-	for (auto& collisionShape : m_collisionShapes)
-	{
-		// 用途が一致していない当たり判定形状はスキップ
-		if (!(targetShape.m_type & collisionShape.second->GetType())) { continue; }
-
-		KdCollider::CollisionResult tmpRes;
-		KdCollider::CollisionResult* pTmpRes = pResults ? &tmpRes : nullptr;
-
-		if (collisionShape.second->Intersects(targetShape, ownerMatrix, pTmpRes))
+	return IntersectsRegisteredShapes(
+		m_collisionShapes,
+		targetShape.m_type,
+		m_disableType,
+		pResults,
+		[&](KdCollisionShape& shape, KdCollider::CollisionResult* pTmpRes)
 		{
-			isHit = true;
-
-			// 詳細な衝突結果を必要としない場合は1つでも接触して返す
-			if (!pResults) { break; }
-
-			pResults->push_back(tmpRes);
+			return shape.Intersects(targetShape, ownerMatrix, pTmpRes);
 		}
-	}
-
-	return isHit;
+	);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -246,30 +850,16 @@ bool KdCollider::Intersects(const RayInfo& targetShape, const Math::Matrix& owne
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 bool KdCollider::Intersects(const CapsuleInfo& targetShape, const Math::Matrix& ownerMatrix, std::list<KdCollider::CollisionResult>* pResults) const
 {
-	// 当たり判定無効のタイプの場合は返る
-	if (targetShape.m_type & m_disableType) { return false; }
-	bool isHit = false;
-
-	for (auto& collisionShape : m_collisionShapes)
-	{
-		// 用途が一致していない当たり判定形状はスキップ
-		if (!(targetShape.m_type & collisionShape.second->GetType())) { continue; }
-
-		KdCollider::CollisionResult tmpRes;
-		KdCollider::CollisionResult* pTmpRes = pResults ? &tmpRes : nullptr;
-
-		if (collisionShape.second->Intersects(targetShape, ownerMatrix, pTmpRes))
+	return IntersectsRegisteredShapes(
+		m_collisionShapes,
+		targetShape.m_type,
+		m_disableType,
+		pResults,
+		[&](KdCollisionShape& shape, KdCollider::CollisionResult* pTmpRes)
 		{
-			isHit = true;
-
-			// 詳細な衝突結果を必要としない場合は1つでも接触して返す
-			if (!pResults) { break; }
-
-			pResults->push_back(tmpRes);
+			return shape.Intersects(targetShape, ownerMatrix, pTmpRes);
 		}
-	}
-
-	return isHit;
+	);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -277,7 +867,7 @@ bool KdCollider::Intersects(const CapsuleInfo& targetShape, const Math::Matrix& 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 void KdCollider::SetEnable(std::string_view name, bool flag)
 {
-	auto targetCol = m_collisionShapes.find(name.data());
+	auto targetCol = m_collisionShapes.find(std::string(name));
 
 	if (targetCol != m_collisionShapes.end())
 	{
@@ -329,11 +919,10 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingSphere& target, const 
 	if (!m_enable) { return false; }
 
 	DirectX::BoundingSphere myShape;
-
 	m_shape.Transform(myShape, world);
 
 	// 球同士の当たり判定
-	bool isHit = myShape.Intersects(target);
+	const bool isHit = myShape.Intersects(target);
 
 	// 詳細リザルトが必要無ければ即結果を返す
 	if (!pRes) { return isHit; }
@@ -341,20 +930,16 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingSphere& target, const 
 	// 当たった時のみ計算
 	if (isHit)
 	{
-		// お互いに当たらない最小距離
-		float needDistance = target.Radius + myShape.Radius;
-
-		// 自身から相手に向かう方向ベクトル
-		pRes->m_hitDir = (Math::Vector3(target.Center) - Math::Vector3(myShape.Center));
-		float betweenDistance = pRes->m_hitDir.Length();
-
-		// 重なり量 = お互い当たらない最小距離 - お互いの実際距離
-		pRes->m_overlapDistance = needDistance - betweenDistance;
-
-		pRes->m_hitDir.Normalize();
-
-		// 当たった座標はお互いの球の衝突の中心点
-		pRes->m_hitPos = myShape.Center + pRes->m_hitDir * (myShape.Radius + pRes->m_overlapDistance * 0.5f);
+		FillLinearHitResult(
+			myShape.Center,
+			myShape.Radius,
+			target.Center,
+			myShape.Radius + target.Radius,
+			*pRes,
+			Math::Vector3(target.Center) - Math::Vector3(myShape.Center),
+			world.Right(),
+			world.Up()
+		);
 	}
 
 	return isHit;
@@ -370,11 +955,10 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingBox& target, const Mat
 	if (!m_enable) { return false; }
 
 	DirectX::BoundingSphere myShape;
-
 	m_shape.Transform(myShape, world);
 
 	// 球vsBOXの当たり判定
-	bool isHit = myShape.Intersects(target);
+	const bool isHit = myShape.Intersects(target);
 
 	// 詳細リザルトが必要無ければ即結果を返す
 	if (!pRes) { return isHit; }
@@ -382,35 +966,23 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingBox& target, const Mat
 	// 当たった時のみ計算
 	if (isHit)
 	{
-		// 点をOBBのローカル座標系へ変換(これでOBBからAABBの判定にできる)
-		Math::Vector3 _pointCenter = myShape.Center - Math::Vector3(target.Center);
+		SphereBoxContact contact;
+		ComputeSphereBoxContact(
+			myShape.Center,
+			myShape.Radius,
+			target.Center,
+			target.Extents,
+			kIdentityQuaternion,
+			Math::Vector3(target.Center) - Math::Vector3(myShape.Center),
+			world.Right(),
+			world.Up(),
+			contact
+		);
 
-		// BOXの最近接点を求める
-		Math::Vector3 _outPos = { 0,0,0 };
-		for (int i = 0; i < 3; i++)
-		{
-			float dist = (&_pointCenter.x)[i];
-			if ((&_pointCenter.x)[i] > (&target.Extents.x)[i])
-			{
-				dist = (&target.Extents.x)[i];
-			}
-			else if (dist < -(&target.Extents.x)[i])
-			{
-				dist = -(&target.Extents.x)[i];
-			}
-			(&_outPos.x)[i] += dist;
-		}
-		_outPos += target.Center;
-
-		// 自身から相手に向かう方向ベクトル
-		pRes->m_hitDir = (_outPos - Math::Vector3(myShape.Center));
-		float betweenDistance = pRes->m_hitDir.Length();
-
-		// 重なり量 = お互い当たらない最小距離 - お互いの実際距離
-		pRes->m_overlapDistance = myShape.Radius - betweenDistance;
-
-		pRes->m_hitDir.Normalize();
+		pRes->m_hitDir = contact.m_hitDir;
+		pRes->m_overlapDistance = contact.m_overlapDistance;
 		pRes->m_hitPos = myShape.Center + pRes->m_hitDir * (myShape.Radius + pRes->m_overlapDistance * 0.5f);
+		pRes->m_hitNDir = pRes->m_hitDir;
 	}
 
 	return isHit;
@@ -426,11 +998,10 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingOrientedBox& target, c
 	if (!m_enable) { return false; }
 
 	DirectX::BoundingSphere myShape;
-
 	m_shape.Transform(myShape, world);
 
 	// 球vsBOXの当たり判定
-	bool isHit = myShape.Intersects(target);
+	const bool isHit = myShape.Intersects(target);
 
 	// 詳細リザルトが必要無ければ即結果を返す
 	if (!pRes) { return isHit; }
@@ -438,40 +1009,23 @@ bool KdSphereCollision::Intersects(const DirectX::BoundingOrientedBox& target, c
 	// 当たった時のみ計算
 	if (isHit)
 	{
-		// OBBの回転(クォータニオン)
-		DirectX::XMFLOAT4 obbQuat = target.Orientation;
+		SphereBoxContact contact;
+		ComputeSphereBoxContact(
+			myShape.Center,
+			myShape.Radius,
+			target.Center,
+			target.Extents,
+			Math::Vector4(target.Orientation),
+			Math::Vector3(target.Center) - Math::Vector3(myShape.Center),
+			world.Right(),
+			world.Up(),
+			contact
+		);
 
-		// 点をOBBのローカル座標系へ変換(これでOBBからAABBの判定にできる)
-		Math::Vector3 _pointCenter = XMVector3InverseRotate(myShape.Center - Math::Vector3(target.Center), Math::Vector4(obbQuat));
-
-		// BOXの最近接点を求める
-		Math::Vector3 _outPos = { 0,0,0 };
-		for (int i = 0; i < 3; i++)
-		{
-			float dist = (&_pointCenter.x)[i];
-			if ((&_pointCenter.x)[i] > (&target.Extents.x)[i])
-			{
-				dist = (&target.Extents.x)[i];
-			}
-			else if (dist < -(&target.Extents.x)[i])
-			{
-				dist = -(&target.Extents.x)[i];
-			}
-			(&_outPos.x)[i] += dist;
-		}
-		// OBBのローカル座標系からワールドへ戻す
-		_outPos = XMVector3Rotate(_outPos, Math::Vector4(obbQuat));
-		_outPos += target.Center;
-
-		// 自身から相手に向かう方向ベクトル
-		pRes->m_hitDir = (_outPos - Math::Vector3(myShape.Center));
-		float betweenDistance = pRes->m_hitDir.Length();
-
-		// 重なり量 = お互い当たらない最小距離 - お互いの実際距離
-		pRes->m_overlapDistance = myShape.Radius - betweenDistance;
-
-		pRes->m_hitDir.Normalize();
+		pRes->m_hitDir = contact.m_hitDir;
+		pRes->m_overlapDistance = contact.m_overlapDistance;
 		pRes->m_hitPos = myShape.Center + pRes->m_hitDir * (myShape.Radius + pRes->m_overlapDistance * 0.5f);
+		pRes->m_hitNDir = pRes->m_hitDir;
 	}
 
 	return isHit;
@@ -486,7 +1040,6 @@ bool KdSphereCollision::Intersects(const KdCollider::RayInfo& target, const Math
 	if (!m_enable) { return false; }
 
 	DirectX::BoundingSphere myShape;
-
 	m_shape.Transform(myShape, world);
 
 	float hitDistance = 0.0f;
@@ -506,6 +1059,7 @@ bool KdSphereCollision::Intersects(const KdCollider::RayInfo& target, const Math
 		pRes->m_hitPos = target.m_pos + target.m_dir * hitDistance;
 
 		pRes->m_hitDir = target.m_dir * (-1);
+		pRes->m_hitNDir = pRes->m_hitDir;
 
 		pRes->m_overlapDistance = target.m_range - hitDistance;
 	}
@@ -536,10 +1090,7 @@ bool KdSphereCollision::Intersects(const KdCollider::CapsuleInfo& target, const 
 	bool isHit = capsuleShape.Intersects(myShape, Math::Matrix::Identity, &tmpRes);
 	if (!isHit) { return false; }
 
-	pRes->m_hitPos = tmpRes.m_hitPos;
-	pRes->m_hitDir = tmpRes.m_hitDir * -1.0f;
-	pRes->m_hitNDir = tmpRes.m_hitNDir * -1.0f;
-	pRes->m_overlapDistance = tmpRes.m_overlapDistance;
+	CopyCollisionResult(tmpRes, *pRes, true);
 
 	return true;
 }
@@ -557,68 +1108,61 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingSphere& target, const Mat
 {
 	if (!m_enable) { return false; }
 
-	DirectX::BoundingBox			myAABBShape;
-	DirectX::BoundingOrientedBox	myOBBShape;
-	m_Abox.Transform(myAABBShape, world);
-	m_Obox.Transform(myOBBShape, world);
+	SphereBoxContact contact;
+	Math::Vector3 myShapeCenter = Math::Vector3::Zero;
+	bool isHit = false;
 
-	DirectX::XMFLOAT4				obbQuat = Math::Vector4::Zero;
-	Math::Vector3					myShapeCenter = (!m_IsOriented) ? myAABBShape.Center : myOBBShape.Center;
-
-	// 球vsBOXの当たり判定
-	bool isHit = (!m_IsOriented) ? myAABBShape.Intersects(target) : myOBBShape.Intersects(target);
-
-	// 詳細リザルトが必要無ければ即結果を返す
-	if (!pRes) { return isHit; }
-
-	// 当たった時のみ計算
-	if (isHit)
+	if (!m_IsOriented)
 	{
-		// 点をOBBのローカル座標系へ変換(これでOBBからAABBの判定にできる)
-		Math::Vector3 _pointCenter = Math::Vector3::Zero;
-		if (!m_IsOriented)
-		{
-			_pointCenter = myShapeCenter - Math::Vector3(target.Center);
-		}
-		else
-		{
-			// OBBの回転(クォータニオン)
-			obbQuat = myOBBShape.Orientation;
-			_pointCenter = XMVector3InverseRotate(myShapeCenter - Math::Vector3(target.Center), Math::Vector4(obbQuat));
-		}
+		DirectX::BoundingBox myShape;
+		m_Abox.Transform(myShape, world);
+		isHit = myShape.Intersects(target);
 
-		// BOXの最近接点を求める
-		Math::Vector3 _outPos = { 0,0,0 };
-		Math::Vector3 _myExtents = (!m_IsOriented) ? myAABBShape.Extents : myOBBShape.Extents;
-		for (int i = 0; i < 3; i++)
-		{
-			float dist = (&_pointCenter.x)[i];
-			if ((&_pointCenter.x)[i] > (&_myExtents.x)[i])
-			{
-				dist = (&_myExtents.x)[i];
-			}
-			else if (dist < -(&_myExtents.x)[i])
-			{
-				dist = -(&_myExtents.x)[i];
-			}
-			(&_outPos.x)[i] += dist;
-		}
-		// OBBのローカル座標系からワールドへ戻す
-		if (m_IsOriented)_outPos = XMVector3Rotate(_outPos, Math::Vector4(obbQuat));
-		_outPos += target.Center;
+		if (!pRes || !isHit) { return isHit; }
 
-		// 自身から相手に向かう方向ベクトル
-		pRes->m_hitDir = (_outPos - Math::Vector3(myShapeCenter));
-		float betweenDistance = pRes->m_hitDir.Length();
+		myShapeCenter = myShape.Center;
+		ComputeSphereBoxContact(
+			target.Center,
+			target.Radius,
+			myShape.Center,
+			myShape.Extents,
+			kIdentityQuaternion,
+			Math::Vector3(myShape.Center) - Math::Vector3(target.Center),
+			world.Right(),
+			world.Up(),
+			contact
+		);
+	}
+	else
+	{
+		DirectX::BoundingOrientedBox myShape;
+		m_Obox.Transform(myShape, world);
+		isHit = myShape.Intersects(target);
 
-		// 重なり量 = お互い当たらない最小距離 - お互いの実際距離
-		pRes->m_overlapDistance = target.Radius - betweenDistance;
+		if (!pRes || !isHit) { return isHit; }
 
-		pRes->m_hitDir.Normalize();
-		pRes->m_hitPos = myShapeCenter + pRes->m_hitDir * (target.Radius + pRes->m_overlapDistance * 0.5f);
+		myShapeCenter = myShape.Center;
+		ComputeSphereBoxContact(
+			target.Center,
+			target.Radius,
+			myShape.Center,
+			myShape.Extents,
+			Math::Vector4(myShape.Orientation),
+			Math::Vector3(myShape.Center) - Math::Vector3(target.Center),
+			world.Right(),
+			world.Up(),
+			contact
+		);
 	}
 
-	return isHit;
+	// 球がBOXの外側にいる時は従来通り BOX -> 球 方向、
+	// 内側にいる時は最短面へ押し出せる向きを優先して安定させる。
+	pRes->m_hitDir = contact.m_isInside ? contact.m_hitDir : (contact.m_hitDir * -1.0f);
+	pRes->m_overlapDistance = contact.m_overlapDistance;
+	pRes->m_hitPos = myShapeCenter + pRes->m_hitDir * (target.Radius + pRes->m_overlapDistance * 0.5f);
+	pRes->m_hitNDir = pRes->m_hitDir;
+
+	return true;
 }
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // BOXvsBOX(AABB)の当たり判定
@@ -629,205 +1173,26 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingBox& target, const Math::
 {
 	if (!m_enable) { return false; }
 
-	// BOXvsBOX(AABB)の当たり判定
-	DirectX::BoundingBox			myAABBShape;
-	DirectX::BoundingOrientedBox	myOBBShape;
-	m_Abox.Transform(myAABBShape, world);
-	m_Obox.Transform(myOBBShape, world);
-
-	bool isHit = (!m_IsOriented) ? myAABBShape.Intersects(target) : myOBBShape.Intersects(target);
-
-	// 詳細リザルトが必要無ければ即結果を返す
-	if (!pRes) { return isHit; }
-
-	// 当たっていないなら押し出し情報は不要
-	if (!isHit) { return false; }
-
-	// SAT(Separating Axis Theorem) で最小分離軸を求めるため、
-	// まずは登録側 / 対象側の両方を OBB 形式へ揃える。
 	DirectX::BoundingOrientedBox myBox;
+	bool isHit = false;
+
 	if (!m_IsOriented)
 	{
-		DirectX::BoundingOrientedBox::CreateFromBoundingBox(myBox, myAABBShape);
+		DirectX::BoundingBox myShape;
+		m_Abox.Transform(myShape, world);
+		isHit = myShape.Intersects(target);
+		if (!pRes || !isHit) { return isHit; }
+
+		myBox = MakeObbFromAabb(myShape);
 	}
 	else
 	{
-		myBox = myOBBShape;
+		m_Obox.Transform(myBox, world);
+		isHit = myBox.Intersects(target);
+		if (!pRes || !isHit) { return isHit; }
 	}
 
-	DirectX::BoundingOrientedBox targetBox;
-	DirectX::BoundingOrientedBox::CreateFromBoundingBox(targetBox, target);
-
-	// OBBのローカル軸をワールド空間へ起こしておく。
-	// AABBを OBB 化した対象側は単位軸になるため、このまま両者を同じ式で扱える。
-	auto BuildBoxAxes = [](const DirectX::BoundingOrientedBox& box, Math::Vector3 outAxes[3])
-	{
-		Math::Vector4 quat = Math::Vector4(box.Orientation);
-		outAxes[0] = Math::Vector3(XMVector3Rotate(Math::Vector3(1.0f, 0.0f, 0.0f), quat));
-		outAxes[1] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 1.0f, 0.0f), quat));
-		outAxes[2] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 0.0f, 1.0f), quat));
-
-		outAxes[0].Normalize();
-		outAxes[1].Normalize();
-		outAxes[2].Normalize();
-	};
-
-	// 押し出し軸上の最前面点を取るためのサポート点計算。
-	// hitPos は厳密な接触面全体ではなく、「最も押し出しを説明しやすい代表点」として扱う。
-	auto GetSupportPoint = [](const DirectX::BoundingOrientedBox& box, const Math::Vector3 axes[3], const Math::Vector3& dir)
-	{
-		Math::Vector3 support = box.Center;
-		const float extents[3] = { box.Extents.x, box.Extents.y, box.Extents.z };
-
-		for (int i = 0; i < 3; i++)
-		{
-			float sign = (DirectX::XMVector3Dot(dir, axes[i]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
-			support += axes[i] * extents[i] * sign;
-		}
-
-		return support;
-	};
-
-	Math::Vector3 myAxes[3];
-	Math::Vector3 targetAxes[3];
-	BuildBoxAxes(myBox, myAxes);
-	BuildBoxAxes(targetBox, targetAxes);
-
-	const float myExtents[3] = { myBox.Extents.x, myBox.Extents.y, myBox.Extents.z };
-	const float targetExtents[3] = { targetBox.Extents.x, targetBox.Extents.y, targetBox.Extents.z };
-
-	Math::Vector3 centerDelta = Math::Vector3(targetBox.Center) - Math::Vector3(myBox.Center);
-
-	// SAT では、相手の中心差を登録側BOXのローカル軸へ投影して扱うと式が揃う。
-	float t[3] =
-	{
-		DirectX::XMVector3Dot(centerDelta, myAxes[0]).m128_f32[0],
-		DirectX::XMVector3Dot(centerDelta, myAxes[1]).m128_f32[0],
-		DirectX::XMVector3Dot(centerDelta, myAxes[2]).m128_f32[0]
-	};
-
-	float rot[3][3] = {};
-	float absRot[3][3] = {};
-	constexpr float kSatEpsilon = 0.0001f;
-
-	for (int i = 0; i < 3; i++)
-	{
-		for (int j = 0; j < 3; j++)
-		{
-			rot[i][j] = DirectX::XMVector3Dot(myAxes[i], targetAxes[j]).m128_f32[0];
-			absRot[i][j] = fabsf(rot[i][j]) + kSatEpsilon;
-		}
-	}
-
-	// 15本の分離軸候補の中から、最も浅い重なり量を持つ軸を採用する。
-	// これが「相手BOXを最短で外へ出せる方向」になる。
-	float minOverlap = FLT_MAX;
-	Math::Vector3 bestAxis = Math::Vector3::Zero;
-
-	auto UpdateBestAxis = [&](Math::Vector3 axis, float overlap)
-	{
-		if (overlap < 0.0f)
-		{
-			// DirectX の Intersects とわずかに誤差が出ても暴れにくいよう、
-			// ごく小さい負値は 0 とみなして続行する。
-			if (overlap < -kSatEpsilon) { return false; }
-			overlap = 0.0f;
-		}
-
-		if (axis.LengthSquared() <= kSatEpsilon)
-		{
-			return true;
-		}
-
-		axis.Normalize();
-
-		if (overlap < minOverlap)
-		{
-			minOverlap = overlap;
-			bestAxis = axis;
-		}
-
-		return true;
-	};
-
-	// 1. 登録側BOXの面法線3本を調べる
-	for (int i = 0; i < 3; i++)
-	{
-		float ra = myExtents[i];
-		float rb =
-			targetExtents[0] * absRot[i][0] +
-			targetExtents[1] * absRot[i][1] +
-			targetExtents[2] * absRot[i][2];
-
-		float dist = fabsf(t[i]);
-		float overlap = ra + rb - dist;
-		float sign = (t[i] >= 0.0f) ? 1.0f : -1.0f;
-
-		if (!UpdateBestAxis(myAxes[i] * sign, overlap)) { return false; }
-	}
-
-	// 2. 対象側BOXの面法線3本を調べる
-	for (int j = 0; j < 3; j++)
-	{
-		float ra =
-			myExtents[0] * absRot[0][j] +
-			myExtents[1] * absRot[1][j] +
-			myExtents[2] * absRot[2][j];
-		float rb = targetExtents[j];
-
-		float projectedCenter =
-			t[0] * rot[0][j] +
-			t[1] * rot[1][j] +
-			t[2] * rot[2][j];
-		float dist = fabsf(projectedCenter);
-		float overlap = ra + rb - dist;
-		float sign = (DirectX::XMVector3Dot(centerDelta, targetAxes[j]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
-
-		if (!UpdateBestAxis(targetAxes[j] * sign, overlap)) { return false; }
-	}
-
-	// 3. 辺同士で押し合うケースもあるため、外積でできる9本の軸も調べる
-	for (int i = 0; i < 3; i++)
-	{
-		for (int j = 0; j < 3; j++)
-		{
-			Math::Vector3 axis = myAxes[i].Cross(targetAxes[j]);
-			if (axis.LengthSquared() <= kSatEpsilon)
-			{
-				// 軸がほぼ平行なら、この外積軸は意味を持たないので飛ばす
-				continue;
-			}
-
-			float ra =
-				myExtents[(i + 1) % 3] * absRot[(i + 2) % 3][j] +
-				myExtents[(i + 2) % 3] * absRot[(i + 1) % 3][j];
-			float rb =
-				targetExtents[(j + 1) % 3] * absRot[i][(j + 2) % 3] +
-				targetExtents[(j + 2) % 3] * absRot[i][(j + 1) % 3];
-
-			float dist = fabsf(
-				t[(i + 2) % 3] * rot[(i + 1) % 3][j] -
-				t[(i + 1) % 3] * rot[(i + 2) % 3][j]
-			);
-			float overlap = ra + rb - dist;
-			float sign = (DirectX::XMVector3Dot(centerDelta, axis).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
-
-			if (!UpdateBestAxis(axis * sign, overlap)) { return false; }
-		}
-	}
-
-	// 採用軸は「登録側BOX -> 対象BOX」の向きで返す。
-	// Character 側はこの向きへ overlapDistance ぶん動かすことで分離できる。
-	pRes->m_hitDir = NormalizeOrFallback(bestAxis, centerDelta, world.Right(), world.Up());
-	pRes->m_overlapDistance = minOverlap;
-
-	// 接触位置は、互いに向かい合うサポート点同士の中点を代表値として返す。
-	Math::Vector3 mySupport = GetSupportPoint(myBox, myAxes, pRes->m_hitDir);
-	Math::Vector3 targetSupport = GetSupportPoint(targetBox, targetAxes, -pRes->m_hitDir);
-	pRes->m_hitPos = (mySupport + targetSupport) * 0.5f;
-	pRes->m_hitNDir = pRes->m_hitDir;
-
-	return true;
+	return ComputeBoxPenetrationResult(myBox, MakeObbFromAabb(target), world.Right(), world.Up(), *pRes);
 }
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // BOXvsBOX(OBB)の当たり判定
@@ -838,205 +1203,26 @@ bool KdBoxCollision::Intersects(const DirectX::BoundingOrientedBox& target, cons
 {
 	if (!m_enable) { return false; }
 
-	// BOXvsBOX(OBB)の当たり判定
-	DirectX::BoundingBox			myAABBShape;
-	DirectX::BoundingOrientedBox	myOBBShape;
-	m_Abox.Transform(myAABBShape, world);
-	m_Obox.Transform(myOBBShape, world);
-
-	bool isHit = (!m_IsOriented) ? myAABBShape.Intersects(target) : myOBBShape.Intersects(target);
-
-	// 詳細リザルトが必要無ければ即結果を返す
-	if (!pRes) { return isHit; }
-
-	// 当たっていないなら押し出し情報は不要
-	if (!isHit) { return false; }
-
-	// SAT(Separating Axis Theorem) で最小分離軸を求めるため、
-	// まずは登録側を OBB 形式へ揃える。
 	DirectX::BoundingOrientedBox myBox;
+	bool isHit = false;
+
 	if (!m_IsOriented)
 	{
-		DirectX::BoundingOrientedBox::CreateFromBoundingBox(myBox, myAABBShape);
+		DirectX::BoundingBox myShape;
+		m_Abox.Transform(myShape, world);
+		isHit = myShape.Intersects(target);
+		if (!pRes || !isHit) { return isHit; }
+
+		myBox = MakeObbFromAabb(myShape);
 	}
 	else
 	{
-		myBox = myOBBShape;
+		m_Obox.Transform(myBox, world);
+		isHit = myBox.Intersects(target);
+		if (!pRes || !isHit) { return isHit; }
 	}
 
-	// 対象側はすでに OBB なのでそのまま使える
-	const DirectX::BoundingOrientedBox& targetBox = target;
-
-	// OBB のローカル軸をワールド空間へ変換する。
-	// この3軸を使って、面法線6本 + 外積軸9本の計15軸を調べる。
-	auto BuildBoxAxes = [](const DirectX::BoundingOrientedBox& box, Math::Vector3 outAxes[3])
-	{
-		Math::Vector4 quat = Math::Vector4(box.Orientation);
-		outAxes[0] = Math::Vector3(XMVector3Rotate(Math::Vector3(1.0f, 0.0f, 0.0f), quat));
-		outAxes[1] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 1.0f, 0.0f), quat));
-		outAxes[2] = Math::Vector3(XMVector3Rotate(Math::Vector3(0.0f, 0.0f, 1.0f), quat));
-
-		outAxes[0].Normalize();
-		outAxes[1].Normalize();
-		outAxes[2].Normalize();
-	};
-
-	// 押し出し方向に対して各BOXの最前面点を取る補助計算。
-	// hitPos は接触面全体の厳密解ではなく、押し出しを説明しやすい代表点として返す。
-	auto GetSupportPoint = [](const DirectX::BoundingOrientedBox& box, const Math::Vector3 axes[3], const Math::Vector3& dir)
-	{
-		Math::Vector3 support = box.Center;
-		const float extents[3] = { box.Extents.x, box.Extents.y, box.Extents.z };
-
-		for (int i = 0; i < 3; i++)
-		{
-			float sign = (DirectX::XMVector3Dot(dir, axes[i]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
-			support += axes[i] * extents[i] * sign;
-		}
-
-		return support;
-	};
-
-	Math::Vector3 myAxes[3];
-	Math::Vector3 targetAxes[3];
-	BuildBoxAxes(myBox, myAxes);
-	BuildBoxAxes(targetBox, targetAxes);
-
-	const float myExtents[3] = { myBox.Extents.x, myBox.Extents.y, myBox.Extents.z };
-	const float targetExtents[3] = { targetBox.Extents.x, targetBox.Extents.y, targetBox.Extents.z };
-
-	Math::Vector3 centerDelta = Math::Vector3(targetBox.Center) - Math::Vector3(myBox.Center);
-
-	// 中心差を登録側BOXの軸へ投影しておくと、各分離軸の式を統一して書ける
-	float t[3] =
-	{
-		DirectX::XMVector3Dot(centerDelta, myAxes[0]).m128_f32[0],
-		DirectX::XMVector3Dot(centerDelta, myAxes[1]).m128_f32[0],
-		DirectX::XMVector3Dot(centerDelta, myAxes[2]).m128_f32[0]
-	};
-
-	float rot[3][3] = {};
-	float absRot[3][3] = {};
-	constexpr float kSatEpsilon = 0.0001f;
-
-	for (int i = 0; i < 3; i++)
-	{
-		for (int j = 0; j < 3; j++)
-		{
-			rot[i][j] = DirectX::XMVector3Dot(myAxes[i], targetAxes[j]).m128_f32[0];
-			absRot[i][j] = fabsf(rot[i][j]) + kSatEpsilon;
-		}
-	}
-
-	// 15本の分離軸候補の中から、最も浅い重なり量を持つ軸を選ぶ。
-	// これが相手BOXを最短で分離できる押し出し方向になる。
-	float minOverlap = FLT_MAX;
-	Math::Vector3 bestAxis = Math::Vector3::Zero;
-
-	auto UpdateBestAxis = [&](Math::Vector3 axis, float overlap)
-	{
-		if (overlap < 0.0f)
-		{
-			// DirectX の Intersects と数値誤差が出ても暴れにくいよう、
-			// ごく小さい負値だけは 0 扱いで続行する。
-			if (overlap < -kSatEpsilon) { return false; }
-			overlap = 0.0f;
-		}
-
-		if (axis.LengthSquared() <= kSatEpsilon)
-		{
-			return true;
-		}
-
-		axis.Normalize();
-
-		if (overlap < minOverlap)
-		{
-			minOverlap = overlap;
-			bestAxis = axis;
-		}
-
-		return true;
-	};
-
-	// 1. 登録側BOXの面法線3本を調べる
-	for (int i = 0; i < 3; i++)
-	{
-		float ra = myExtents[i];
-		float rb =
-			targetExtents[0] * absRot[i][0] +
-			targetExtents[1] * absRot[i][1] +
-			targetExtents[2] * absRot[i][2];
-
-		float dist = fabsf(t[i]);
-		float overlap = ra + rb - dist;
-		float sign = (t[i] >= 0.0f) ? 1.0f : -1.0f;
-
-		if (!UpdateBestAxis(myAxes[i] * sign, overlap)) { return false; }
-	}
-
-	// 2. 対象側BOXの面法線3本を調べる
-	for (int j = 0; j < 3; j++)
-	{
-		float ra =
-			myExtents[0] * absRot[0][j] +
-			myExtents[1] * absRot[1][j] +
-			myExtents[2] * absRot[2][j];
-		float rb = targetExtents[j];
-
-		float projectedCenter =
-			t[0] * rot[0][j] +
-			t[1] * rot[1][j] +
-			t[2] * rot[2][j];
-		float dist = fabsf(projectedCenter);
-		float overlap = ra + rb - dist;
-		float sign = (DirectX::XMVector3Dot(centerDelta, targetAxes[j]).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
-
-		if (!UpdateBestAxis(targetAxes[j] * sign, overlap)) { return false; }
-	}
-
-	// 3. 辺同士が最初に当たるケースもあるため、外積でできる9本の軸も調べる
-	for (int i = 0; i < 3; i++)
-	{
-		for (int j = 0; j < 3; j++)
-		{
-			Math::Vector3 axis = myAxes[i].Cross(targetAxes[j]);
-			if (axis.LengthSquared() <= kSatEpsilon)
-			{
-				// ほぼ平行な軸同士の外積は有効な分離軸にならない
-				continue;
-			}
-
-			float ra =
-				myExtents[(i + 1) % 3] * absRot[(i + 2) % 3][j] +
-				myExtents[(i + 2) % 3] * absRot[(i + 1) % 3][j];
-			float rb =
-				targetExtents[(j + 1) % 3] * absRot[i][(j + 2) % 3] +
-				targetExtents[(j + 2) % 3] * absRot[i][(j + 1) % 3];
-
-			float dist = fabsf(
-				t[(i + 2) % 3] * rot[(i + 1) % 3][j] -
-				t[(i + 1) % 3] * rot[(i + 2) % 3][j]
-			);
-			float overlap = ra + rb - dist;
-			float sign = (DirectX::XMVector3Dot(centerDelta, axis).m128_f32[0] >= 0.0f) ? 1.0f : -1.0f;
-
-			if (!UpdateBestAxis(axis * sign, overlap)) { return false; }
-		}
-	}
-
-	// 採用軸は「登録側BOX -> 対象BOX」の向きで返す。
-	// 呼び出し側はこの向きに overlapDistance ぶん動かすことで最短分離できる。
-	pRes->m_hitDir = NormalizeOrFallback(bestAxis, centerDelta, world.Right(), world.Up());
-	pRes->m_overlapDistance = minOverlap;
-
-	// 接触位置は、互いに向かい合うサポート点の中点を代表値として返す
-	Math::Vector3 mySupport = GetSupportPoint(myBox, myAxes, pRes->m_hitDir);
-	Math::Vector3 targetSupport = GetSupportPoint(targetBox, targetAxes, -pRes->m_hitDir);
-	pRes->m_hitPos = (mySupport + targetSupport) * 0.5f;
-	pRes->m_hitNDir = pRes->m_hitDir;
-
-	return true;
+	return ComputeBoxPenetrationResult(myBox, target, world.Right(), world.Up(), *pRes);
 }
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // BOXvsレイの当たり判定
@@ -1047,15 +1233,24 @@ bool KdBoxCollision::Intersects(const KdCollider::RayInfo& target, const Math::M
 {
 	if (!m_enable) { return false; }
 
-	// AABB vs レイ
-	float AABBdist = FLT_MAX;
+	float hitDistance = FLT_MAX;
+	bool isHit = false;
 
-	// BOXvsBOX(OBB)の当たり判定
-	DirectX::BoundingBox			myAABBShape;
-	DirectX::BoundingOrientedBox	myOBBShape;
-	m_Abox.Transform(myAABBShape, world);
-	m_Obox.Transform(myOBBShape, world);
-	bool isHit = (!m_IsOriented) ? myAABBShape.Intersects(target.m_pos, target.m_dir, AABBdist) : myOBBShape.Intersects(target.m_pos, target.m_dir, AABBdist);
+	if (!m_IsOriented)
+	{
+		DirectX::BoundingBox myShape;
+		m_Abox.Transform(myShape, world);
+		isHit = myShape.Intersects(target.m_pos, target.m_dir, hitDistance);
+	}
+	else
+	{
+		DirectX::BoundingOrientedBox myShape;
+		m_Obox.Transform(myShape, world);
+		isHit = myShape.Intersects(target.m_pos, target.m_dir, hitDistance);
+	}
+
+	// 他形状と同様に、レイの有効距離外は HIT 扱いしない
+	isHit &= (target.m_range >= hitDistance);
 
 	// 即結果を返す(HITしたかどうかだけが知れる)
 	return isHit;
@@ -1069,37 +1264,58 @@ bool KdBoxCollision::Intersects(const KdCollider::CapsuleInfo& target, const Mat
 {
 	if (!m_enable) { return false; }
 
-	// BOX側は「target のカプセルをどう押し戻すか」を返したいので、
-	// 実際の判定はカプセル側実装へ委譲し、向きだけカプセル用に反転して返す。
-	DirectX::BoundingBox			myAABBShape;
-	DirectX::BoundingOrientedBox	myOBBShape;
-	m_Abox.Transform(myAABBShape, world);
-	m_Obox.Transform(myOBBShape, world);
+	const CapsuleShapeData capsule = BuildCapsuleShapeData(target);
+	const CapsuleSamplePoints samples = BuildCapsuleSamplePoints(capsule);
 
-	KdCapsuleCollision capsuleShape(target);
+	KdCollider::CollisionResult tmpRes = {};
+	KdCollider::CollisionResult* pTmpRes = pRes ? &tmpRes : nullptr;
+	bool isHit = false;
 
-	// まずは当たったかどうかだけ欲しい場合
-	if (!pRes)
+	if (!m_IsOriented)
 	{
-		return (!m_IsOriented) ?
-			capsuleShape.Intersects(myAABBShape, Math::Matrix::Identity, nullptr) :
-			capsuleShape.Intersects(myOBBShape, Math::Matrix::Identity, nullptr);
+		DirectX::BoundingBox myShape;
+		m_Abox.Transform(myShape, world);
+		if (!myShape.Intersects(BuildBroadSphere(capsule)))
+		{
+			return false;
+		}
+
+		isHit = ResolveCapsuleVsBox(
+			capsule,
+			samples,
+			myShape.Center,
+			myShape.Extents,
+			kIdentityQuaternion,
+			world.Right(),
+			Math::Vector3::Up,
+			pTmpRes
+		);
+	}
+	else
+	{
+		DirectX::BoundingOrientedBox myShape;
+		m_Obox.Transform(myShape, world);
+		if (!myShape.Intersects(BuildBroadSphere(capsule)))
+		{
+			return false;
+		}
+
+		isHit = ResolveCapsuleVsBox(
+			capsule,
+			samples,
+			myShape.Center,
+			myShape.Extents,
+			Math::Vector4(myShape.Orientation),
+			world.Right(),
+			Math::Vector3::Up,
+			pTmpRes
+		);
 	}
 
-	KdCollider::CollisionResult tmpRes;
-	bool isHit = (!m_IsOriented) ?
-		capsuleShape.Intersects(myAABBShape, Math::Matrix::Identity, &tmpRes) :
-		capsuleShape.Intersects(myOBBShape, Math::Matrix::Identity, &tmpRes);
+	if (!pRes || !isHit) { return isHit; }
 
-	if (!isHit) { return false; }
-
-	// カプセル側実装は「BOXを押し戻す向き」で結果を返すため、
-	// BOX側から見る時はカプセルを押し戻せる向きへ反転する。
-	pRes->m_hitPos = tmpRes.m_hitPos;
-	pRes->m_hitDir = tmpRes.m_hitDir * -1.0f;
-	pRes->m_hitNDir = tmpRes.m_hitNDir * -1.0f;
-	pRes->m_overlapDistance = tmpRes.m_overlapDistance;
-
+	// ResolveCapsuleVsBox は「カプセル -> BOX」で返すので、BOX側から見た結果に反転する
+	CopyCollisionResult(tmpRes, *pRes, true);
 	return true;
 }
 
@@ -1125,6 +1341,7 @@ bool KdModelCollision::Intersects(const DirectX::BoundingSphere& target, const M
 
 	const std::vector<KdModelData::Node>& dataNodes = spModelData->GetOriginalNodes();
 	const std::vector<KdModelWork::Node>& workNodes = m_shape->GetNodes();
+	const std::vector<int>& collisionNodeIndices = spModelData->GetCollisionMeshNodeIndices();
 
 	// 各メッシュに押される用の球・押される毎に座標を更新する必要がある
 	DirectX::BoundingSphere pushedSphere = target;
@@ -1137,7 +1354,7 @@ bool KdModelCollision::Intersects(const DirectX::BoundingSphere& target, const M
 	Math::Vector3 hitNDir;
 
 	// 当たり判定ノードとのみ当たり判定
-	for (int index : spModelData->GetCollisionMeshNodeIndices())
+	for (int index : collisionNodeIndices)
 	{
 		const KdModelData::Node& dataNode = dataNodes[index];
 		const KdModelWork::Node& workNode = workNodes[index];
@@ -1227,14 +1444,15 @@ bool KdModelCollision::Intersects(const KdCollider::RayInfo& target, const Math:
 	// データが無ければ判定不能なので返る
 	if (!spModelData) { return false; }
 
-	CollisionMeshResult nearestResult;
+	CollisionMeshResult nearestResult = {};
 
 	bool isHit = false;
 
 	const std::vector<KdModelData::Node>& dataNodes = spModelData->GetOriginalNodes();
 	const std::vector<KdModelWork::Node>& workNodes = m_shape->GetNodes();
+	const std::vector<int>& collisionNodeIndices = spModelData->GetCollisionMeshNodeIndices();
 
-	for (int index : spModelData->GetCollisionMeshNodeIndices())
+	for (int index : collisionNodeIndices)
 	{
 		const KdModelData::Node& dataNode = dataNodes[index];
 		const KdModelWork::Node& workNode = workNodes[index];
@@ -1253,25 +1471,18 @@ bool KdModelCollision::Intersects(const KdCollider::RayInfo& target, const Math:
 		// 詳細リザルトが必要無ければ即結果を返す
 		if (!pRes) { return true; }
 
-		isHit = true;
-
-		if (tmpResult.m_overlapDistance > nearestResult.m_overlapDistance)
+		if (!isHit || tmpResult.m_overlapDistance > nearestResult.m_overlapDistance)
 		{
 			nearestResult = tmpResult;
 		}
+
+		isHit = true;
 	}
 
 	if (pRes && isHit)
 	{
 		// 最も近くで当たったヒット情報をコピーする
-		pRes->m_hitPos = nearestResult.m_hitPos;
-
-		pRes->m_hitDir = nearestResult.m_hitDir;
-
-		pRes->m_overlapDistance = nearestResult.m_overlapDistance;
-
-		// 最も近くで当たった面の法線が使用される
-		pRes->m_hitNDir = nearestResult.m_hitNDir;
+		CopyCollisionMeshResult(nearestResult, *pRes);
 	}
 
 	return isHit;
@@ -1294,66 +1505,9 @@ bool KdModelCollision::Intersects(const KdCollider::CapsuleInfo& target, const M
 
 	// モデル側にカプセル専用の低レベル判定が無いので、
 	// ここではカプセルを縦方向に並んだ複数の球へ分解して既存の球vsメッシュ判定を再利用する。
-	Math::Vector3 capsuleCenter = target.m_pos + target.m_offset;
-
-	float capsuleRadius = target.m_radius;
-	if (capsuleRadius < 0.0f)
-	{
-		capsuleRadius = 0.0f;
-	}
-
-	float capsuleHeight = target.m_height;
-	if (capsuleHeight < 0.0f)
-	{
-		capsuleHeight = 0.0f;
-	}
-	if (capsuleHeight < capsuleRadius * 2.0f)
-	{
-		capsuleHeight = capsuleRadius * 2.0f;
-	}
-
-	float cylinderLength = capsuleHeight - capsuleRadius * 2.0f;
-	Math::Vector3 capsuleStart = capsuleCenter - Math::Vector3::Up * (cylinderLength * 0.5f);
-	Math::Vector3 capsuleEnd = capsuleCenter + Math::Vector3::Up * (cylinderLength * 0.5f);
-
-	// 球の間隔は半径以下にして、見た目のカプセルに近い当たり形状を作る
-	int sampleCount = 1;
-	if (cylinderLength > kCapsuleEpsilon)
-	{
-		// サンプル間隔が広いと、球と球の間の輪郭が痩せて
-		// BOXの面に対して見た目上めり込みやすくなる。
-		// そのため半径の半分間隔でサンプルし、前後方向の当たりも安定させる。
-		float sampleStep = capsuleRadius * 0.5f;
-		if (sampleStep <= kCapsuleEpsilon)
-		{
-			sampleStep = cylinderLength;
-		}
-
-		sampleCount = static_cast<int>(std::ceil(cylinderLength / sampleStep)) + 1;
-		sampleCount = std::clamp(sampleCount, 2, 16);
-	}
-
-	std::vector<Math::Vector3> sampleCenters;
-	sampleCenters.reserve(sampleCount);
-
-	if (sampleCount == 1)
-	{
-		sampleCenters.push_back(capsuleCenter);
-	}
-	else
-	{
-		Math::Vector3 capsuleAxis = capsuleEnd - capsuleStart;
-		for (int i = 0; i < sampleCount; i++)
-		{
-			float t = static_cast<float>(i) / static_cast<float>(sampleCount - 1);
-			sampleCenters.push_back(capsuleStart + capsuleAxis * t);
-		}
-	}
-
-	// カプセル全体を包む球を作っておくと、メッシュ単位の粗い早期除外に使える
-	DirectX::BoundingSphere broadSphere;
-	broadSphere.Center = capsuleCenter;
-	broadSphere.Radius = capsuleRadius + cylinderLength * 0.5f;
+	const CapsuleShapeData capsule = BuildCapsuleShapeData(target);
+	const CapsuleSamplePoints samples = BuildCapsuleSamplePoints(capsule);
+	const DirectX::BoundingSphere broadSphere = BuildBroadSphere(capsule);
 
 	bool isHit = false;
 
@@ -1367,50 +1521,54 @@ bool KdModelCollision::Intersects(const KdCollider::CapsuleInfo& target, const M
 
 	const std::vector<KdModelData::Node>& dataNodes = spModelData->GetOriginalNodes();
 	const std::vector<KdModelWork::Node>& workNodes = m_shape->GetNodes();
+	const std::vector<int>& collisionNodeIndices = spModelData->GetCollisionMeshNodeIndices();
+
+	std::vector<ModelCollisionCache> collisionMeshes;
+	collisionMeshes.reserve(collisionNodeIndices.size());
+	for (int index : collisionNodeIndices)
+	{
+		const KdModelData::Node& dataNode = dataNodes[index];
+		const KdModelWork::Node& workNode = workNodes[index];
+		if (!dataNode.m_spMesh) { continue; }
+
+		ModelCollisionCache cache;
+		cache.m_mesh = dataNode.m_spMesh.get();
+		cache.m_world = workNode.m_worldTransform * world;
+		dataNode.m_spMesh->GetBoundingBox().Transform(cache.m_aabb, cache.m_world);
+		collisionMeshes.push_back(cache);
+	}
 
 	// 1回で全押し戻しを加算すると、
 	// 同じ壁に触れている複数サンプル球が補正を重複させてしまいガタつきやすい。
 	// そこで「今の状態で最も強い押し戻し」を1回だけ採用し、必要なら数回繰り返す。
-	constexpr int kSolveIteration = 4;
-	for (int solve = 0; solve < kSolveIteration; solve++)
+	for (int solve = 0; solve < kCapsuleSolveIteration; ++solve)
 	{
 		bool hitThisSolve = false;
 		Math::Vector3 bestPush = Math::Vector3::Zero;
 		Math::Vector3 bestHitPos = Math::Vector3::Zero;
 		Math::Vector3 bestHitNDir = Math::Vector3::Zero;
 
-		for (int index : spModelData->GetCollisionMeshNodeIndices())
+		for (const ModelCollisionCache& collisionMesh : collisionMeshes)
 		{
-			const KdModelData::Node& dataNode = dataNodes[index];
-			const KdModelWork::Node& workNode = workNodes[index];
-
-			// あり得ないはずだが一応チェック
-			if (!dataNode.m_spMesh) { continue; }
-
-			const Math::Matrix meshWorld = workNode.m_worldTransform * world;
-
 			// メッシュ単位のブロードフェイズ
 			DirectX::BoundingSphere currentBroadSphere = broadSphere;
 			currentBroadSphere.Center = Math::Vector3(currentBroadSphere.Center) + totalPush;
-
-			DirectX::BoundingBox meshAabb;
-			dataNode.m_spMesh->GetBoundingBox().Transform(meshAabb, meshWorld);
-			if (!meshAabb.Intersects(currentBroadSphere))
+			if (!collisionMesh.m_aabb.Intersects(currentBroadSphere))
 			{
 				continue;
 			}
 
 			// カプセルを構成する各球で詳細判定する
-			for (const Math::Vector3& baseCenter : sampleCenters)
+			for (int i = 0; i < samples.m_count; ++i)
 			{
 				DirectX::BoundingSphere sampleSphere;
-				sampleSphere.Center = baseCenter + totalPush;
-				sampleSphere.Radius = capsuleRadius;
+				sampleSphere.Center = samples.m_centers[i] + totalPush;
+				sampleSphere.Radius = capsule.m_radius;
 
 				CollisionMeshResult tmpResult;
 				CollisionMeshResult* pTmpResult = pRes ? &tmpResult : nullptr;
 
-				if (!MeshIntersect(*dataNode.m_spMesh, sampleSphere, meshWorld, pTmpResult))
+				if (!MeshIntersect(*collisionMesh.m_mesh, sampleSphere, collisionMesh.m_world, pTmpResult))
 				{
 					continue;
 				}
@@ -1488,13 +1646,7 @@ bool KdPolygonCollision::Intersects(const DirectX::BoundingSphere& target, const
 
 	if (pRes)
 	{
-		pRes->m_hitPos = result.m_hitPos;
-
-		pRes->m_hitDir = result.m_hitDir;
-
-		pRes->m_overlapDistance = result.m_overlapDistance;
-
-		pRes->m_hitNDir = result.m_hitNDir;
+		CopyCollisionMeshResult(result, *pRes);
 	}
 
 	return true;
@@ -1543,13 +1695,7 @@ bool KdPolygonCollision::Intersects(const KdCollider::RayInfo& target, const Mat
 
 	if (pRes)
 	{
-		pRes->m_hitPos = result.m_hitPos;
-
-		pRes->m_hitDir = result.m_hitDir;
-
-		pRes->m_overlapDistance = result.m_overlapDistance;
-
-		pRes->m_hitNDir = result.m_hitNDir;
+		CopyCollisionMeshResult(result, *pRes);
 	}
 
 	return true;
@@ -1560,7 +1706,7 @@ bool KdPolygonCollision::Intersects(const KdCollider::RayInfo& target, const Mat
 // 判定回数は ポリゴンの個数 計算回数がポリゴンデータ依存のため処理効率は不安定
 // 単純に計算回数が多くなる可能性があるため重くなりがち
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-bool KdPolygonCollision::Intersects(const KdCollider::CapsuleInfo& target, const Math::Matrix& world, KdCollider::CollisionResult* pRes)
+bool KdPolygonCollision::Intersects(const KdCollider::CapsuleInfo& /*target*/, const Math::Matrix& /*world*/, KdCollider::CollisionResult* /*pRes*/)
 {
 	// TODO: 当たり計算は各自必要に応じて拡張して下さい
 	return false;
@@ -1579,58 +1725,11 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingSphere& target, const
 	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
 	if (!m_enable || !m_shape) { return false; }
 
-	Math::Vector3 pos			= m_shape->m_pos + m_shape->m_offset;
-	Math::Vector3 capsuleCenter = Math::Vector3::Transform(pos, world);
-	Math::Vector3 up = world.Up();
-	float upScale = up.Length();
-	if (upScale <= kCapsuleEpsilon)
-	{
-		up = Math::Vector3::Up;
-		upScale = 1.0f;
-	}
-	else
-	{
-		up.Normalize();
-	}
-
-	float radiusScale = world.Right().Length();
-	float backwardScale = world.Backward().Length();
-	if (backwardScale > radiusScale)
-	{
-		radiusScale = backwardScale;
-	}
-	if (radiusScale <= kCapsuleEpsilon)
-	{
-		radiusScale = 1.0f;
-	}
-
-	float capsuleRadius = m_shape->m_radius;
-	if (capsuleRadius < 0.0f)
-	{
-		capsuleRadius = 0.0f;
-	}
-	capsuleRadius *= radiusScale;
-
-	float capsuleHeight = m_shape->m_height;
-	if (capsuleHeight < 0.0f)
-	{
-		capsuleHeight = 0.0f;
-	}
-	capsuleHeight *= upScale;
-	if (capsuleHeight < capsuleRadius * 2.0f)
-	{
-		capsuleHeight = capsuleRadius * 2.0f;
-	}
-
-	float cylinderLength = capsuleHeight - capsuleRadius * 2.0f;
-	Math::Vector3 capsuleStart = capsuleCenter - up * (cylinderLength * 0.5f);
-	Math::Vector3 capsuleEnd = capsuleCenter + up * (cylinderLength * 0.5f);
-
-	Math::Vector3 closestPos = ClosestPointOnSegment(Math::Vector3(target.Center), capsuleStart, capsuleEnd);
-	Math::Vector3 capsuleToTarget = Math::Vector3(target.Center) - closestPos;
-
-	float needDistance = capsuleRadius + target.Radius;
-	bool isHit = capsuleToTarget.LengthSquared() <= needDistance * needDistance;
+	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
+	const Math::Vector3 closestPos = ClosestPointOnSegment(Math::Vector3(target.Center), capsule.m_start, capsule.m_end);
+	const Math::Vector3 capsuleToTarget = Math::Vector3(target.Center) - closestPos;
+	const float needDistance = capsule.m_radius + target.Radius;
+	const bool isHit = capsuleToTarget.LengthSquared() <= needDistance * needDistance;
 
 	// 詳細リザルトが必要無ければ即結果を返す
 	if (!pRes) { return isHit; }
@@ -1638,20 +1737,16 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingSphere& target, const
 	// 当たった時のみ計算
 	if (isHit)
 	{
-		float betweenDistance = capsuleToTarget.Length();
-
-		pRes->m_hitDir = NormalizeOrFallback(
-			capsuleToTarget,
-			Math::Vector3(target.Center) - capsuleCenter,
+		FillLinearHitResult(
+			closestPos,
+			capsule.m_radius,
+			target.Center,
+			needDistance,
+			*pRes,
+			Math::Vector3(target.Center) - capsule.m_center,
 			world.Right(),
-			up
+			capsule.m_up
 		);
-
-		pRes->m_overlapDistance = needDistance - betweenDistance;
-
-		pRes->m_hitPos = closestPos + pRes->m_hitDir * (capsuleRadius + pRes->m_overlapDistance * 0.5f);
-
-		pRes->m_hitNDir = pRes->m_hitDir;
 	}
 
 	return isHit;
@@ -1665,256 +1760,22 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingBox& target, const Ma
 	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
 	if (!m_enable || !m_shape) { return false; }
 
-	// まずは登録側カプセルを「中心線分 + 半径」に変換する
-	Math::Vector3 pos = m_shape->m_pos + m_shape->m_offset;
-	Math::Vector3 capsuleCenter = Math::Vector3::Transform(pos, world);
-
-	// 行列の Up 方向をカプセルの縦軸として使う
-	Math::Vector3 up = world.Up();
-	float upScale = up.Length();
-	if (upScale <= kCapsuleEpsilon)
-	{
-		up = Math::Vector3::Up;
-		upScale = 1.0f;
-	}
-	else
-	{
-		up.Normalize();
-	}
-
-	// 半径は横方向スケールの大きい方を採用して潰れを防ぐ
-	float radiusScale = world.Right().Length();
-	float backwardScale = world.Backward().Length();
-	if (backwardScale > radiusScale)
-	{
-		radiusScale = backwardScale;
-	}
-	if (radiusScale <= kCapsuleEpsilon)
-	{
-		radiusScale = 1.0f;
-	}
-
-	float capsuleRadius = m_shape->m_radius;
-	if (capsuleRadius < 0.0f)
-	{
-		capsuleRadius = 0.0f;
-	}
-	capsuleRadius *= radiusScale;
-
-	float capsuleHeight = m_shape->m_height;
-	if (capsuleHeight < 0.0f)
-	{
-		capsuleHeight = 0.0f;
-	}
-	capsuleHeight *= upScale;
-	if (capsuleHeight < capsuleRadius * 2.0f)
-	{
-		// 高さが直径より小さい場合は球として扱える最小サイズに丸める
-		capsuleHeight = capsuleRadius * 2.0f;
-	}
-
-	float cylinderLength = capsuleHeight - capsuleRadius * 2.0f;
-	Math::Vector3 capsuleStart = capsuleCenter - up * (cylinderLength * 0.5f);
-	Math::Vector3 capsuleEnd = capsuleCenter + up * (cylinderLength * 0.5f);
-
-	// AABBはカプセル専用の低レベル判定を持っていないため、
-	// ここではカプセルを縦方向に並んだ複数の球として扱い、各球とAABBの最近接点を使って判定する。
-	int sampleCount = 1;
-	if (cylinderLength > kCapsuleEpsilon)
-	{
-		// サンプル間隔が広いと、球と球の間の輪郭が痩せて
-		// BOXの面に対して見た目上めり込みやすくなる。
-		// そのため半径の半分間隔でサンプルし、前後方向の当たりも安定させる。
-		float sampleStep = capsuleRadius * 0.5f;
-		if (sampleStep <= kCapsuleEpsilon)
-		{
-			sampleStep = cylinderLength;
-		}
-
-		sampleCount = static_cast<int>(std::ceil(cylinderLength / sampleStep)) + 1;
-		sampleCount = std::clamp(sampleCount, 2, 16);
-	}
-
-	std::vector<Math::Vector3> sampleCenters;
-	sampleCenters.reserve(sampleCount);
-
-	if (sampleCount == 1)
-	{
-		sampleCenters.push_back(capsuleCenter);
-	}
-	else
-	{
-		Math::Vector3 capsuleAxis = capsuleEnd - capsuleStart;
-		for (int i = 0; i < sampleCount; i++)
-		{
-			float t = static_cast<float>(i) / static_cast<float>(sampleCount - 1);
-			sampleCenters.push_back(capsuleStart + capsuleAxis * t);
-		}
-	}
-
-	// target の AABB は「当たる側」の情報なので、呼び出し時点で既にワールド座標系にある。
-	// ここでさらに world を掛けると、登録側カプセルの行列を相手BOXへ二重適用してしまい、
-	// 面の位置がずれて前後方向の押し戻し量が狂う原因になる。
-	const Math::Vector3 boxMin = Math::Vector3(target.Center) - Math::Vector3(target.Extents);
-	const Math::Vector3 boxMax = Math::Vector3(target.Center) + Math::Vector3(target.Extents);
-
-	// 粗い早期除外用に、カプセル全体を包む球を使う
-	DirectX::BoundingSphere broadSphere;
-	broadSphere.Center = capsuleCenter;
-	broadSphere.Radius = capsuleRadius + cylinderLength * 0.5f;
-	if (!target.Intersects(broadSphere))
+	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
+	if (!target.Intersects(BuildBroadSphere(capsule)))
 	{
 		return false;
 	}
 
-	bool isHit = false;
-
-	// 複数のサンプル球が同じ面に同時に触れると補正を重複させやすいので、
-	// 1回の解決では最も強い押し戻しだけを採用し、必要なら数回だけ再解決する。
-	Math::Vector3 totalCorrection = Math::Vector3::Zero;
-	Math::Vector3 hitPos = Math::Vector3::Zero;
-	Math::Vector3 hitNDir = Math::Vector3::Zero;
-
-	constexpr int kSolveIteration = 4;
-	for (int solve = 0; solve < kSolveIteration; solve++)
-	{
-		bool hitThisSolve = false;
-		Math::Vector3 bestCorrection = Math::Vector3::Zero;
-		Math::Vector3 bestHitPos = Math::Vector3::Zero;
-		Math::Vector3 bestHitNDir = Math::Vector3::Zero;
-
-		for (const Math::Vector3& baseCenter : sampleCenters)
-		{
-			// サンプル球は、これまでに求めた実際の補正量だけ動かした位置で再判定する
-			Math::Vector3 sphereCenter = baseCenter + totalCorrection;
-
-			// まずは球の中心がAABBの内側か外側かを調べる
-			bool isInside =
-				(sphereCenter.x >= boxMin.x && sphereCenter.x <= boxMax.x) &&
-				(sphereCenter.y >= boxMin.y && sphereCenter.y <= boxMax.y) &&
-				(sphereCenter.z >= boxMin.z && sphereCenter.z <= boxMax.z);
-
-			Math::Vector3 nearestPos = sphereCenter;
-			// hitDir は「カプセル -> BOX」の向きで揃える。
-			// ただし実際にカプセルを押し出す時は、この逆向きを使う。
-			Math::Vector3 hitDir = Math::Vector3::Zero;
-			float overlapDistance = 0.0f;
-
-			if (!isInside)
-			{
-				// 外側にいる場合は、AABB上の最近接点との距離で球vsAABB判定をする
-				nearestPos.x = std::clamp(sphereCenter.x, boxMin.x, boxMax.x);
-				nearestPos.y = std::clamp(sphereCenter.y, boxMin.y, boxMax.y);
-				nearestPos.z = std::clamp(sphereCenter.z, boxMin.z, boxMax.z);
-
-				Math::Vector3 toBox = nearestPos - sphereCenter;
-				float distSqr = toBox.LengthSquared();
-				if (distSqr > capsuleRadius * capsuleRadius)
-				{
-					continue;
-				}
-
-				float betweenDistance = std::sqrt(distSqr);
-				hitDir = NormalizeOrFallback(
-					toBox,
-					Math::Vector3(target.Center) - sphereCenter,
-					world.Right(),
-					up
-				);
-
-				overlapDistance = capsuleRadius - betweenDistance;
-			}
-			else
-			{
-				// 内部にいる場合は、最も近い面までの距離を調べてそこへ押し出す
-				float distToMinX = sphereCenter.x - boxMin.x;
-				float distToMaxX = boxMax.x - sphereCenter.x;
-				float distToMinY = sphereCenter.y - boxMin.y;
-				float distToMaxY = boxMax.y - sphereCenter.y;
-				float distToMinZ = sphereCenter.z - boxMin.z;
-				float distToMaxZ = boxMax.z - sphereCenter.z;
-
-				float nearestFaceDist = distToMinX;
-				hitDir = Math::Vector3(-1.0f, 0.0f, 0.0f);
-				nearestPos = Math::Vector3(boxMin.x, sphereCenter.y, sphereCenter.z);
-
-				if (distToMaxX < nearestFaceDist)
-				{
-					nearestFaceDist = distToMaxX;
-					hitDir = Math::Vector3(1.0f, 0.0f, 0.0f);
-					nearestPos = Math::Vector3(boxMax.x, sphereCenter.y, sphereCenter.z);
-				}
-				if (distToMinY < nearestFaceDist)
-				{
-					nearestFaceDist = distToMinY;
-					hitDir = Math::Vector3(0.0f, -1.0f, 0.0f);
-					nearestPos = Math::Vector3(sphereCenter.x, boxMin.y, sphereCenter.z);
-				}
-				if (distToMaxY < nearestFaceDist)
-				{
-					nearestFaceDist = distToMaxY;
-					hitDir = Math::Vector3(0.0f, 1.0f, 0.0f);
-					nearestPos = Math::Vector3(sphereCenter.x, boxMax.y, sphereCenter.z);
-				}
-				if (distToMinZ < nearestFaceDist)
-				{
-					nearestFaceDist = distToMinZ;
-					hitDir = Math::Vector3(0.0f, 0.0f, -1.0f);
-					nearestPos = Math::Vector3(sphereCenter.x, sphereCenter.y, boxMin.z);
-				}
-				if (distToMaxZ < nearestFaceDist)
-				{
-					nearestFaceDist = distToMaxZ;
-					hitDir = Math::Vector3(0.0f, 0.0f, 1.0f);
-					nearestPos = Math::Vector3(sphereCenter.x, sphereCenter.y, boxMax.z);
-				}
-
-				// 球の中心が面まで食い込んでいるぶん + 半径ぶんだけ押し戻せば分離できる
-				overlapDistance = capsuleRadius + nearestFaceDist;
-			}
-
-			// 詳細リザルトが必要無ければ、1つでも当たった時点で返す
-			if (!pRes) { return true; }
-
-			hitThisSolve = true;
-			isHit = true;
-
-			// 返却規約上の hitDir は BOX へ向かう向きなので、
-			// 実際にカプセルを分離させる補正は逆向きに取る。
-			Math::Vector3 correction = hitDir * -overlapDistance;
-
-			// 今回の解決で最も強い押し戻しだけを採用する
-			if (correction.LengthSquared() > bestCorrection.LengthSquared())
-			{
-				bestCorrection = correction;
-				bestHitPos = sphereCenter + hitDir * (capsuleRadius + overlapDistance * 0.5f);
-				bestHitNDir = hitDir;
-			}
-		}
-
-		// これ以上押し出しが必要なければ終了
-		if (!hitThisSolve || bestCorrection.LengthSquared() <= kCapsuleEpsilon)
-		{
-			break;
-		}
-
-		totalCorrection += bestCorrection;
-		hitPos = bestHitPos;
-		hitNDir = bestHitNDir;
-	}
-
-	if (pRes && isHit)
-	{
-		// 実際の補正は BOX -> カプセル方向なので、
-		// 返却時は既存実装の規約に合わせて反転し「カプセル -> BOX」で返す。
-		pRes->m_overlapDistance = totalCorrection.Length();
-		pRes->m_hitDir = NormalizeOrFallback(-totalCorrection, hitNDir, world.Right(), up);
-
-		pRes->m_hitPos = hitPos;
-		pRes->m_hitNDir = hitNDir;
-	}
-
-	return isHit;
+	return ResolveCapsuleVsBox(
+		capsule,
+		BuildCapsuleSamplePoints(capsule),
+		target.Center,
+		target.Extents,
+		kIdentityQuaternion,
+		world.Right(),
+		capsule.m_up,
+		pRes
+	);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -1925,248 +1786,22 @@ bool KdCapsuleCollision::Intersects(const DirectX::BoundingOrientedBox& target, 
 	// 当たり判定が無効 or 形状が解放済みなら判定せず返る
 	if (!m_enable || !m_shape) { return false; }
 
-	// まずは登録側カプセルを「中心線分 + 半径」に変換する
-	Math::Vector3 pos = m_shape->m_pos + m_shape->m_offset;
-	Math::Vector3 capsuleCenter = Math::Vector3::Transform(pos, world);
-
-	// 行列の Up 方向をカプセルの縦軸として使う
-	Math::Vector3 up = world.Up();
-	float upScale = up.Length();
-	if (upScale <= kCapsuleEpsilon)
-	{
-		up = Math::Vector3::Up;
-		upScale = 1.0f;
-	}
-	else
-	{
-		up.Normalize();
-	}
-
-	// 半径は横方向スケールの大きい方を採用して潰れを防ぐ
-	float radiusScale = world.Right().Length();
-	float backwardScale = world.Backward().Length();
-	if (backwardScale > radiusScale)
-	{
-		radiusScale = backwardScale;
-	}
-	if (radiusScale <= kCapsuleEpsilon)
-	{
-		radiusScale = 1.0f;
-	}
-
-	float capsuleRadius = m_shape->m_radius;
-	if (capsuleRadius < 0.0f)
-	{
-		capsuleRadius = 0.0f;
-	}
-	capsuleRadius *= radiusScale;
-
-	float capsuleHeight = m_shape->m_height;
-	if (capsuleHeight < 0.0f)
-	{
-		capsuleHeight = 0.0f;
-	}
-	capsuleHeight *= upScale;
-	if (capsuleHeight < capsuleRadius * 2.0f)
-	{
-		// 高さが直径より小さい場合は球として扱える最小サイズに丸める
-		capsuleHeight = capsuleRadius * 2.0f;
-	}
-
-	float cylinderLength = capsuleHeight - capsuleRadius * 2.0f;
-	Math::Vector3 capsuleStart = capsuleCenter - up * (cylinderLength * 0.5f);
-	Math::Vector3 capsuleEnd = capsuleCenter + up * (cylinderLength * 0.5f);
-
-	// OBBも低レベルのカプセル判定を持たないため、
-	// カプセルを複数球へ分解し、各球を OBB のローカル座標系で AABB として判定する。
-	int sampleCount = 1;
-	if (cylinderLength > kCapsuleEpsilon)
-	{
-		// OBB相手でも、サンプル間隔が広いと球と球の間の輪郭が痩せて
-		// 面に対して前後方向のめり込みが見えやすくなる。
-		// AABB版と同じく半径の半分間隔まで細かくして、押し戻し量を安定させる。
-		float sampleStep = capsuleRadius * 0.5f;
-		if (sampleStep <= kCapsuleEpsilon)
-		{
-			sampleStep = cylinderLength;
-		}
-
-		sampleCount = static_cast<int>(std::ceil(cylinderLength / sampleStep)) + 1;
-		sampleCount = std::clamp(sampleCount, 2, 16);
-	}
-
-	std::vector<Math::Vector3> sampleCenters;
-	sampleCenters.reserve(sampleCount);
-
-	if (sampleCount == 1)
-	{
-		sampleCenters.push_back(capsuleCenter);
-	}
-	else
-	{
-		Math::Vector3 capsuleAxis = capsuleEnd - capsuleStart;
-		for (int i = 0; i < sampleCount; i++)
-		{
-			float t = static_cast<float>(i) / static_cast<float>(sampleCount - 1);
-			sampleCenters.push_back(capsuleStart + capsuleAxis * t);
-		}
-	}
-
-	// 粗い早期除外用に、カプセル全体を包む球を使う
-	DirectX::BoundingSphere broadSphere;
-	broadSphere.Center = capsuleCenter;
-	broadSphere.Radius = capsuleRadius + cylinderLength * 0.5f;
-	if (!target.Intersects(broadSphere))
+	const CapsuleShapeData capsule = BuildCapsuleShapeData(*m_shape, world);
+	if (!target.Intersects(BuildBroadSphere(capsule)))
 	{
 		return false;
 	}
 
-	const Math::Vector3 boxExtents = target.Extents;
-	const Math::Vector4 obbQuat = Math::Vector4(target.Orientation);
-
-	bool isHit = false;
-
-	// 複数サンプルの補正をそのまま全部足すとガタつきやすいので、
-	// 1回の解決では最も強い押し戻しだけを採用し、必要なら数回だけ再解決する。
-	// OBB版も考え方は AABB版と同じで、
-	// 返却規約用の向きと実際の補正向きが逆になる点に注意する。
-	Math::Vector3 totalCorrection = Math::Vector3::Zero;
-	Math::Vector3 hitPos = Math::Vector3::Zero;
-	Math::Vector3 hitNDir = Math::Vector3::Zero;
-
-	constexpr int kSolveIteration = 4;
-	for (int solve = 0; solve < kSolveIteration; solve++)
-	{
-		bool hitThisSolve = false;
-		Math::Vector3 bestCorrection = Math::Vector3::Zero;
-		Math::Vector3 bestHitPos = Math::Vector3::Zero;
-		Math::Vector3 bestHitNDir = Math::Vector3::Zero;
-
-		for (const Math::Vector3& baseCenter : sampleCenters)
-		{
-			Math::Vector3 sphereCenter = baseCenter + totalCorrection;
-
-			// OBBのローカル空間へ変換すると、回転付きBOXも AABB として扱える
-			Math::Vector3 localCenter = XMVector3InverseRotate(
-				sphereCenter - Math::Vector3(target.Center),
-				obbQuat
-			);
-
-			bool isInside =
-				(localCenter.x >= -boxExtents.x && localCenter.x <= boxExtents.x) &&
-				(localCenter.y >= -boxExtents.y && localCenter.y <= boxExtents.y) &&
-				(localCenter.z >= -boxExtents.z && localCenter.z <= boxExtents.z);
-
-			Math::Vector3 nearestLocal = localCenter;
-			Math::Vector3 hitDir = Math::Vector3::Zero;
-			float overlapDistance = 0.0f;
-
-			if (!isInside)
-			{
-				// 外側にいる場合は、OBB上の最近接点との距離で判定する
-				nearestLocal.x = std::clamp(localCenter.x, -boxExtents.x, boxExtents.x);
-				nearestLocal.y = std::clamp(localCenter.y, -boxExtents.y, boxExtents.y);
-				nearestLocal.z = std::clamp(localCenter.z, -boxExtents.z, boxExtents.z);
-
-				Math::Vector3 nearestWorld = Math::Vector3(XMVector3Rotate(nearestLocal, obbQuat)) + Math::Vector3(target.Center);
-				Math::Vector3 toBox = nearestWorld - sphereCenter;
-				float distSqr = toBox.LengthSquared();
-				if (distSqr > capsuleRadius * capsuleRadius)
-				{
-					continue;
-				}
-
-				float betweenDistance = std::sqrt(distSqr);
-				hitDir = NormalizeOrFallback(
-					toBox,
-					Math::Vector3(target.Center) - sphereCenter,
-					world.Right(),
-					up
-				);
-
-				overlapDistance = capsuleRadius - betweenDistance;
-			}
-			else
-			{
-				// 内部にいる場合は、最も近い面の法線方向へ押し戻せば分離できる
-				float distToMinX = localCenter.x + boxExtents.x;
-				float distToMaxX = boxExtents.x - localCenter.x;
-				float distToMinY = localCenter.y + boxExtents.y;
-				float distToMaxY = boxExtents.y - localCenter.y;
-				float distToMinZ = localCenter.z + boxExtents.z;
-				float distToMaxZ = boxExtents.z - localCenter.z;
-
-				float nearestFaceDist = distToMinX;
-				Math::Vector3 hitDirLocal(-1.0f, 0.0f, 0.0f);
-
-				if (distToMaxX < nearestFaceDist)
-				{
-					nearestFaceDist = distToMaxX;
-					hitDirLocal = Math::Vector3(1.0f, 0.0f, 0.0f);
-				}
-				if (distToMinY < nearestFaceDist)
-				{
-					nearestFaceDist = distToMinY;
-					hitDirLocal = Math::Vector3(0.0f, -1.0f, 0.0f);
-				}
-				if (distToMaxY < nearestFaceDist)
-				{
-					nearestFaceDist = distToMaxY;
-					hitDirLocal = Math::Vector3(0.0f, 1.0f, 0.0f);
-				}
-				if (distToMinZ < nearestFaceDist)
-				{
-					nearestFaceDist = distToMinZ;
-					hitDirLocal = Math::Vector3(0.0f, 0.0f, -1.0f);
-				}
-				if (distToMaxZ < nearestFaceDist)
-				{
-					nearestFaceDist = distToMaxZ;
-					hitDirLocal = Math::Vector3(0.0f, 0.0f, 1.0f);
-				}
-
-				hitDir = XMVector3Rotate(hitDirLocal, obbQuat);
-				overlapDistance = capsuleRadius + nearestFaceDist;
-			}
-
-			// 詳細リザルトが必要無ければ、1つでも当たった時点で返す
-			if (!pRes) { return true; }
-
-			hitThisSolve = true;
-			isHit = true;
-
-			Math::Vector3 correction = hitDir * -overlapDistance;
-
-			// 今回の解決で最も強い押し戻しだけを採用する
-			if (correction.LengthSquared() > bestCorrection.LengthSquared())
-			{
-				bestCorrection = correction;
-				bestHitPos = sphereCenter + hitDir * (capsuleRadius + overlapDistance * 0.5f);
-				bestHitNDir = hitDir;
-			}
-		}
-
-		// これ以上押し出しが必要なければ終了
-		if (!hitThisSolve || bestCorrection.LengthSquared() <= kCapsuleEpsilon)
-		{
-			break;
-		}
-
-		totalCorrection += bestCorrection;
-		hitPos = bestHitPos;
-		hitNDir = bestHitNDir;
-	}
-
-	if (pRes && isHit)
-	{
-		pRes->m_overlapDistance = totalCorrection.Length();
-		pRes->m_hitDir = NormalizeOrFallback(-totalCorrection, hitNDir, world.Right(), up);
-
-		pRes->m_hitPos = hitPos;
-		pRes->m_hitNDir = hitNDir;
-	}
-
-	return isHit;
+	return ResolveCapsuleVsBox(
+		capsule,
+		BuildCapsuleSamplePoints(capsule),
+		target.Center,
+		target.Extents,
+		Math::Vector4(target.Orientation),
+		world.Right(),
+		capsule.m_up,
+		pRes
+	);
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -2186,177 +1821,38 @@ bool KdCapsuleCollision::Intersects(const KdCollider::CapsuleInfo& target, const
 {
 	if (!m_enable || !m_shape) { return false; }
 
-	// まずは登録側カプセルを「中心線分 + 半径」に変換する
-	Math::Vector3 myPos = m_shape->m_pos + m_shape->m_offset;
-	Math::Vector3 myCenter = Math::Vector3::Transform(myPos, world);
+	const CapsuleShapeData myCapsule = BuildCapsuleShapeData(*m_shape, world);
+	const CapsuleShapeData targetCapsule = BuildCapsuleShapeData(target);
 
-	// 行列の Up 方向をカプセルの縦軸として使う
-	Math::Vector3 myUp = world.Up();
-	float myUpScale = myUp.Length();
-	if (myUpScale <= kCapsuleEpsilon)
-	{
-		myUp = Math::Vector3::Up;
-		myUpScale = 1.0f;
-	}
-	else
-	{
-		myUp.Normalize();
-	}
+	Math::Vector3 myClosest = Math::Vector3::Zero;
+	Math::Vector3 targetClosest = Math::Vector3::Zero;
+	ClosestPointsBetweenSegments(
+		myCapsule.m_start,
+		myCapsule.m_end,
+		targetCapsule.m_start,
+		targetCapsule.m_end,
+		myClosest,
+		targetClosest
+	);
 
-	// 半径は横方向スケールの大きい方を採用して潰れを防ぐ
-	float myRadiusScale = world.Right().Length();
-	float myBackwardScale = world.Backward().Length();
-	if (myBackwardScale > myRadiusScale)
-	{
-		myRadiusScale = myBackwardScale;
-	}
-	if (myRadiusScale <= kCapsuleEpsilon)
-	{
-		myRadiusScale = 1.0f;
-	}
-
-	float myRadius = m_shape->m_radius;
-	if (myRadius < 0.0f)
-	{
-		myRadius = 0.0f;
-	}
-	myRadius *= myRadiusScale;
-
-	float myHeight = m_shape->m_height;
-	if (myHeight < 0.0f)
-	{
-		myHeight = 0.0f;
-	}
-	myHeight *= myUpScale;
-	if (myHeight < myRadius * 2.0f)
-	{
-		// 高さが直径より小さい場合は球として扱える最小サイズに丸める
-		myHeight = myRadius * 2.0f;
-	}
-
-	float myCylinderLength = myHeight - myRadius * 2.0f;
-	Math::Vector3 myStart = myCenter - myUp * (myCylinderLength * 0.5f);
-	Math::Vector3 myEnd = myCenter + myUp * (myCylinderLength * 0.5f);
-
-	// 対象側も同様に「中心線分 + 半径」へ変換する
-	Math::Vector3 targetCenter = target.m_pos + target.m_offset;
-	// CapsuleInfo だけでは回転情報を持てないので対象側はワールドUp基準で扱う
-	Math::Vector3 targetUp = Math::Vector3::Up;
-
-	float targetRadius = target.m_radius;
-	if (targetRadius < 0.0f)
-	{
-		targetRadius = 0.0f;
-	}
-
-	float targetHeight = target.m_height;
-	if (targetHeight < 0.0f)
-	{
-		targetHeight = 0.0f;
-	}
-	if (targetHeight < targetRadius * 2.0f)
-	{
-		targetHeight = targetRadius * 2.0f;
-	}
-
-	float targetCylinderLength = targetHeight - targetRadius * 2.0f;
-	Math::Vector3 targetStart = targetCenter - targetUp * (targetCylinderLength * 0.5f);
-	Math::Vector3 targetEnd = targetCenter + targetUp * (targetCylinderLength * 0.5f);
-
-	Math::Vector3 d1 = myEnd - myStart;
-	Math::Vector3 d2 = targetEnd - targetStart;
-	Math::Vector3 r = myStart - targetStart;
-
-	float a = DirectX::XMVector3Dot(d1, d1).m128_f32[0];
-	float e = DirectX::XMVector3Dot(d2, d2).m128_f32[0];
-	float f = DirectX::XMVector3Dot(d2, r).m128_f32[0];
-
-	// 2本の線分上で最も近くなる位置 s,t を求める
-	float s = 0.0f;
-	float t = 0.0f;
-
-	if (a <= kCapsuleEpsilon && e <= kCapsuleEpsilon)
-	{
-		// 両方ほぼ点
-		s = 0.0f;
-		t = 0.0f;
-	}
-	else if (a <= kCapsuleEpsilon)
-	{
-		// 自分側だけほぼ点
-		s = 0.0f;
-		t = std::clamp(f / e, 0.0f, 1.0f);
-	}
-	else
-	{
-		float c = DirectX::XMVector3Dot(d1, r).m128_f32[0];
-
-		if (e <= kCapsuleEpsilon)
-		{
-			// 対象側だけほぼ点
-			t = 0.0f;
-			s = std::clamp(-c / a, 0.0f, 1.0f);
-		}
-		else
-		{
-			// 一般的な線分同士。無限直線で最短になる位置を出してから線分範囲へ丸める
-			float b = DirectX::XMVector3Dot(d1, d2).m128_f32[0];
-			float denom = a * e - b * b;
-
-			if (fabsf(denom) > kCapsuleEpsilon)
-			{
-				s = std::clamp((b * f - c * e) / denom, 0.0f, 1.0f);
-			}
-			else
-			{
-				// ほぼ平行なら片方の始点寄せから始める
-				s = 0.0f;
-			}
-
-			t = (b * s + f) / e;
-
-			if (t < 0.0f)
-			{
-				// t が範囲外なら対象側始点に合わせて再計算
-				t = 0.0f;
-				s = std::clamp(-c / a, 0.0f, 1.0f);
-			}
-			else if (t > 1.0f)
-			{
-				// t が範囲外なら対象側終点に合わせて再計算
-				t = 1.0f;
-				s = std::clamp((b - c) / a, 0.0f, 1.0f);
-			}
-		}
-	}
-
-	// 最短距離になる2点間ベクトルが、そのまま押し出し方向の元になる
-	Math::Vector3 myClosest = myStart + d1 * s;
-	Math::Vector3 targetClosest = targetStart + d2 * t;
-	Math::Vector3 hitVec = targetClosest - myClosest;
-
-	float needDistance = myRadius + targetRadius;
-	bool isHit = hitVec.LengthSquared() <= needDistance * needDistance;
+	const Math::Vector3 hitVec = targetClosest - myClosest;
+	const float needDistance = myCapsule.m_radius + targetCapsule.m_radius;
+	const bool isHit = hitVec.LengthSquared() <= needDistance * needDistance;
 
 	if (!pRes) { return isHit; }
 
 	if (isHit)
 	{
-		float betweenDistance = hitVec.Length();
-
-		// ベクトルが潰れていても押し出し方向が失われないようフォールバックを用意する
-		pRes->m_hitDir = NormalizeOrFallback(
-			hitVec,
-			targetCenter - myCenter,
+		FillLinearHitResult(
+			myClosest,
+			myCapsule.m_radius,
+			targetClosest,
+			needDistance,
+			*pRes,
+			targetCapsule.m_center - myCapsule.m_center,
 			world.Right(),
-			myUp
+			myCapsule.m_up
 		);
-
-		// 必要距離との差分が重なり量
-		pRes->m_overlapDistance = needDistance - betweenDistance;
-		// 接触位置は登録側カプセル表面と対象側カプセル表面の中間点
-		pRes->m_hitPos = myClosest + pRes->m_hitDir * (myRadius + pRes->m_overlapDistance * 0.5f);
-		pRes->m_hitNDir = pRes->m_hitDir;
 	}
 
 	return isHit;
