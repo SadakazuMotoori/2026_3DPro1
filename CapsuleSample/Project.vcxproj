@@ -280,6 +280,7 @@
     <ClInclude Include="Src\Application\GameObject\Character\CharacterBase.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Enemy\Enemy01\Enemy01.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Enemy\EnemyBase.h" />
+    <ClInclude Include="Src\Application\GameObject\Effect\LensFlare\LensFlare.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Player\PlayerBase.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Player\SkinmeshMan\SkinmeshMan.h" />
     <ClInclude Include="Src\Application\GameObject\Map\MapBase.h" />
@@ -344,6 +345,7 @@
     <ClCompile Include="Src\Application\GameObject\Character\CharacterBase.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Enemy\Enemy01\Enemy01.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Enemy\EnemyBase.cpp" />
+    <ClCompile Include="Src\Application\GameObject\Effect\LensFlare\LensFlare.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Player\PlayerBase.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Player\SkinmeshMan\SkinmeshMan.cpp" />
     <ClCompile Include="Src\Application\GameObject\Map\MapBase.cpp" />

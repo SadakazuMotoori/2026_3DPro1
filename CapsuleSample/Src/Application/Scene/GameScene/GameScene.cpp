@@ -7,6 +7,7 @@
 #include "../../GameObject/Map/Stage01/Stage01.h"
 #include "../../GameObject/Character/Player/SkinMeshMan/SkinMeshMan.h"
 #include "../../GameObject/Character/Enemy/Enemy01/Enemy01.h"
+#include "../../GameObject/Effect/LensFlare/LensFlare.h"
 
 void GameScene::Event()
 {
@@ -53,4 +54,9 @@ void GameScene::Init()
 	// キャラクターにカメラ情報をセット
 	_skinmeshMan->SetCamera(_camera);
 	AddObject(_camera);
+
+	std::shared_ptr<LensFlare> _lensFlare = std::make_shared<LensFlare>();
+	_lensFlare->Init();
+	_lensFlare->SetCamera(_camera);
+	AddObject(_lensFlare);
 }

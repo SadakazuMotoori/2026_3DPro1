@@ -309,6 +309,9 @@
     <ClInclude Include="Src\Application\GameObject\Character\Enemy\EnemyBase.h">
       <Filter>Src\Application\GameObject\Character\Enemy</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Application\GameObject\Effect\LensFlare\LensFlare.h">
+      <Filter>Src\Application\GameObject</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Application\GameObject\Camera\CameraBase.h">
       <Filter>Src\Application\GameObject\Camera</Filter>
     </ClInclude>
@@ -487,6 +490,9 @@
     </ClCompile>
     <ClCompile Include="Src\Application\GameObject\Character\Enemy\EnemyBase.cpp">
       <Filter>Src\Application\GameObject\Character\Enemy</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Application\GameObject\Effect\LensFlare\LensFlare.cpp">
+      <Filter>Src\Application\GameObject</Filter>
     </ClCompile>
     <ClCompile Include="Src\Application\GameObject\Camera\CameraBase.cpp">
       <Filter>Src\Application\GameObject\Camera</Filter>
