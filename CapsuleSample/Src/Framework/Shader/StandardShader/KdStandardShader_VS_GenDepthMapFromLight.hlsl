@@ -9,12 +9,19 @@ VSOutputGenShadow main(
 	float2 uv : TEXCOORD0,		// テクスチャUV座標
 	float4 color : COLOR,		// 頂点カラー
 	float3 normal : NORMAL,		// 法線
-	float3 tangent : TANGENT)	// 接線
+	float3 tangent : TANGENT,	// 接線
+	uint instanceId : SV_InstanceID)
 {
 	VSOutputGenShadow Out;
+
+	row_major float4x4 mWorld = g_mWorld;
+	if (g_UseInstancing)
+	{
+		mWorld = g_mInstanceWorld[instanceId];
+	}
 	
 	// キャラクターの座標変換 : ローカル座標系 -> ワールド座標系へ変換
-	Out.Pos = mul(pos, g_mWorld);
+	Out.Pos = mul(pos, mWorld);
 	
 	// カメラの逆向きに変換 : ワールド座標系 -> ビュー座標系 -> 射影座標系へ変換
 	Out.Pos = mul(Out.Pos, g_DL_mLightVP);

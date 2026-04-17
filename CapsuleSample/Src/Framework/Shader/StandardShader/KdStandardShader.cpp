@@ -22,6 +22,7 @@ void KdStandardShader::BeginLit()
 
 		KdShaderManager::Instance().SetVSConstantBuffer(0, m_cb0_Obj.GetAddress());
 		KdShaderManager::Instance().SetVSConstantBuffer(1, m_cb1_Mesh.GetAddress());
+		KdShaderManager::Instance().SetVSConstantBuffer(4, m_cb4_Instancing.GetAddress());
 	}
 
 	// ピクセルシェーダーのパイプライン変更
@@ -69,6 +70,7 @@ void KdStandardShader::BeginUnLit()
 
 		KdShaderManager::Instance().SetVSConstantBuffer(0, m_cb0_Obj.GetAddress());
 		KdShaderManager::Instance().SetVSConstantBuffer(1, m_cb1_Mesh.GetAddress());
+		KdShaderManager::Instance().SetVSConstantBuffer(4, m_cb4_Instancing.GetAddress());
 	}
 
 	if (KdShaderManager::Instance().SetPixelShader(m_PS_UnLit))
@@ -100,6 +102,7 @@ void KdStandardShader::BeginGenerateDepthMapFromLight()
 
 		KdShaderManager::Instance().SetVSConstantBuffer(0, m_cb0_Obj.GetAddress());
 		KdShaderManager::Instance().SetVSConstantBuffer(1, m_cb1_Mesh.GetAddress());
+		KdShaderManager::Instance().SetVSConstantBuffer(4, m_cb4_Instancing.GetAddress());
 	}
 
 	// ボーン情報をセット(スキンメッシュ対応)
@@ -164,6 +167,32 @@ void KdStandardShader::DrawMesh(const KdMesh* mesh, const Math::Matrix& mWorld,
 	}
 }
 
+void KdStandardShader::DrawMeshInstanced(const KdMesh* mesh, UINT instanceCount,
+	const std::vector<KdMaterial>& materials, const Math::Vector4& colRate, const Math::Vector3& emissive)
+{
+	if (mesh == nullptr) { return; }
+	if (instanceCount == 0) { return; }
+
+	// メッシュの頂点情報転送
+	mesh->SetToDevice();
+
+	// 全サブセット
+	for (UINT subi = 0; subi < mesh->GetSubsets().size(); subi++)
+	{
+		// 面が１枚も無い場合はスキップ
+		if (mesh->GetSubsets()[subi].FaceCount == 0)continue;
+
+		// マテリアルデータの転送
+		const KdMaterial& material = materials[mesh->GetSubsets()[subi].MaterialNo];
+		WriteMaterial(material, colRate, emissive);
+
+		//-----------------------
+		// サブセット描画
+		//-----------------------
+		mesh->DrawSubsetInstanced(subi, instanceCount);
+	}
+}
+
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // モデルデータを描画（スタティック(アニメーションをしない)なモデル専用
 // ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
@@ -190,6 +219,48 @@ void KdStandardShader::DrawModel(const KdModelData& rModel, const Math::Matrix& 
 
 	// 定数に変更があった場合は自動的に初期状態に戻す
 	if(m_dirtyCBObj)
+	{
+		ResetCBObject();
+	}
+}
+
+void KdStandardShader::DrawModel(const KdModelData& rModel, const std::vector<Math::Matrix>& instanceWorlds,
+	const Math::Color& colRate, const Math::Vector3& emissive)
+{
+	if (instanceWorlds.empty()) { return; }
+
+	// オブジェクト単位の情報転送
+	if (m_dirtyCBObj)
+	{
+		m_cb0_Obj.Write();
+	}
+
+	SetInstancingEnable(true);
+
+	auto& dataNodes = rModel.GetOriginalNodes();
+
+	// 全描画用メッシュノードを描画
+	for (auto& nodeIdx : rModel.GetDrawMeshNodeIndices())
+	{
+		for (size_t instanceBase = 0; instanceBase < instanceWorlds.size(); instanceBase += maxInstanceDrawCount)
+		{
+			UINT drawInstanceCount = (UINT)std::min<size_t>(maxInstanceDrawCount, instanceWorlds.size() - instanceBase);
+
+			auto& cbInstancing = m_cb4_Instancing.Work();
+			for (UINT i = 0; i < drawInstanceCount; i++)
+			{
+				cbInstancing.mWorlds[i] = dataNodes[nodeIdx].m_worldTransform * instanceWorlds[instanceBase + i];
+			}
+			m_cb4_Instancing.Write();
+
+			DrawMeshInstanced(dataNodes[nodeIdx].m_spMesh.get(), drawInstanceCount, rModel.GetMaterials(), colRate, emissive);
+		}
+	}
+
+	SetInstancingEnable(false);
+
+	// 定数に変更があった場合は自動的に初期状態に戻す
+	if (m_dirtyCBObj)
 	{
 		ResetCBObject();
 	}
@@ -251,6 +322,84 @@ void KdStandardShader::DrawModel(KdModelWork& rModel, const Math::Matrix& mWorld
 		DrawMesh(dataNodes[nodeIdx].m_spMesh.get(), workNodes[nodeIdx].m_worldTransform * mWorld,
 			data->GetMaterials(), colRate, emissive);
 	}
+
+	// 定数に変更があった場合は自動的に初期状態に戻す
+	if (m_dirtyCBObj)
+	{
+		ResetCBObject();
+	}
+}
+
+void KdStandardShader::DrawModel(KdModelWork& rModel, const std::vector<Math::Matrix>& instanceWorlds,
+	const Math::Color& colRate, const Math::Vector3& emissive)
+{
+	if (!rModel.IsEnable()) { return; }
+	if (instanceWorlds.empty()) { return; }
+
+	const std::shared_ptr<KdModelData>& data = rModel.GetData();
+
+	// データがないときはスキップ
+	if (data == nullptr) { return; }
+
+	if (rModel.NeedCalcNodeMatrices())
+	{
+		rModel.CalcNodeMatrices();
+	}
+
+	// オブジェクト単位の情報転送(スキンメッシュ対応)
+	SetIsSkinMeshObj(data->IsSkinMesh());
+	if (m_dirtyCBObj)
+	{
+		m_cb0_Obj.Write();
+	}
+
+	SetInstancingEnable(true);
+
+	auto& workNodes = rModel.GetNodes();
+	auto& dataNodes = data->GetOriginalNodes();
+
+	// スキンメッシュモデルの場合：ボーン情報を書き込み(スキンメッシュ対応)
+	if (data->IsSkinMesh())
+	{
+		// ノード内からボーン情報を取得
+		for (auto&& nodeIdx : data->GetBoneNodeIndices())
+		{
+			if (nodeIdx >= KdStandardShader::maxBoneBufferSize)
+			{
+				SetInstancingEnable(false);
+				assert(0 && "転送できるボーンの上限数を超えました");
+				return;
+			}
+
+			auto& dataNode = dataNodes[nodeIdx];
+			auto& workNode = workNodes[nodeIdx];
+
+			// ボーン情報からGPUに渡す行列の計算
+			m_cb3_Bone.Work().mBones[dataNode.m_boneIndex] = dataNode.m_boneInverseWorldMatrix * workNode.m_worldTransform;
+
+			m_cb3_Bone.Write();
+		}
+	}
+
+	// 全描画用メッシュノードを描画
+	for (auto& nodeIdx : data->GetDrawMeshNodeIndices())
+	{
+		for (size_t instanceBase = 0; instanceBase < instanceWorlds.size(); instanceBase += maxInstanceDrawCount)
+		{
+			UINT drawInstanceCount = (UINT)std::min<size_t>(maxInstanceDrawCount, instanceWorlds.size() - instanceBase);
+
+			auto& cbInstancing = m_cb4_Instancing.Work();
+			for (UINT i = 0; i < drawInstanceCount; i++)
+			{
+				cbInstancing.mWorlds[i] = workNodes[nodeIdx].m_worldTransform * instanceWorlds[instanceBase + i];
+			}
+			m_cb4_Instancing.Write();
+
+			DrawMeshInstanced(dataNodes[nodeIdx].m_spMesh.get(), drawInstanceCount, data->GetMaterials(), colRate, emissive);
+		}
+	}
+
+	SetInstancingEnable(false);
 
 	// 定数に変更があった場合は自動的に初期状態に戻す
 	if (m_dirtyCBObj)
@@ -503,6 +652,7 @@ bool KdStandardShader::Init()
 	m_cb1_Mesh.Create();
 	m_cb2_Material.Create();
 	m_cb3_Bone.Create();
+	m_cb4_Instancing.Create();
 
 	std::shared_ptr<KdTexture> ds = std::make_shared<KdTexture>();
 	ds->CreateDepthStencil(1024, 1024);
@@ -542,6 +692,7 @@ void KdStandardShader::Release()
 	m_cb2_Material.Release();
 	// スキンメッシュ対応
 	m_cb3_Bone.Release();
+	m_cb4_Instancing.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -607,4 +758,12 @@ void KdStandardShader::ResetCBObject()
 	m_cb0_Obj.Write();
 
 	m_dirtyCBObj = false;
+}
+
+void KdStandardShader::SetInstancingEnable(bool enable)
+{
+	if (m_cb4_Instancing.Get().UseInstancing == (int)enable) { return; }
+
+	m_cb4_Instancing.Work().UseInstancing = enable;
+	m_cb4_Instancing.Write();
 }

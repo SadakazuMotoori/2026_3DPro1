@@ -10,6 +10,8 @@ void Enemy01::Init()
 		m_spModel->SetModelData("Asset/Models/Character/Robot/Robot.gltf");
 
 		m_pCollider = std::make_unique<KdCollider>();
+		m_spAnimator = std::make_shared<KdAnimator>();
+		m_spAnimator->SetAnimation(m_spModel->GetAnimation("Stand"));
 
 		// モデル登録
 		KdCollider::CapsuleInfo _cpInfo(KdCollider::TypeBump, GetPos(), {0.0f, 0.7f, 0.0f}, 1.5f, 0.3f);
@@ -38,6 +40,10 @@ void Enemy01::Init()
 	SetPos({ 2, 0, 5 });
 }
 
+void Enemy01::PreUpdate()
+{
+	m_InstanceWorlds.clear();
+}
 void Enemy01::Update()
 {
 	m_Gravity += 0.01f;
@@ -62,4 +68,26 @@ void Enemy01::PreDraw()
 	// BOX(OBB)デバッグワイヤーの描画
 //	Math::Matrix _mat = Math::Matrix::CreateRotationY(DirectX::XMConvertToRadians(45)) * Math::Matrix::CreateTranslation(GetPos());
 //	m_pDebugWire->AddDebugBox(_mat, {0.5f,0.5f ,0.5f}, { 0.0f,0.5f ,0.0f },true);
+}
+
+void Enemy01::DrawLit()
+{
+	if (!m_spModel) return;
+
+	for (int i = 0; i < m_Num; i++)
+	{
+		Math::Matrix _mat = Math::Matrix::Identity;
+		_mat._41 = -20 + (20 - (i % 10));
+		_mat._43 = -20 + (i / 10) * 2.0f;
+		m_InstanceWorlds.push_back(_mat);
+	}
+	KdShaderManager::Instance().m_StandardShader.DrawModel(*m_spModel, m_mWorld);
+//	KdShaderManager::Instance().m_StandardShader.DrawModel(*m_spModel, m_InstanceWorlds);
+}
+
+void Enemy01::GenerateDepthMapFromLight()
+{
+	if (!m_spModel) return;
+
+	KdShaderManager::Instance().m_StandardShader.DrawModel(*m_spModel, m_mWorld);
 }

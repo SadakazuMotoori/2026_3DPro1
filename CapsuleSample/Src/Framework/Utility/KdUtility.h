@@ -14,9 +14,6 @@ namespace Math = DirectX::SimpleMath;
 constexpr float KdToRadians = (3.141592654f / 180.0f);
 constexpr float KdToDegrees = (180.0f / 3.141592654f);
 
-// コリジョン計算用の微小値
-constexpr float KdCollisionEpsilon = 0.0001f;
-
 // 安全にReleaseするための関数
 template<class T>
 void KdSafeRelease(T*& p)
@@ -143,3 +140,11 @@ inline Math::Vector3 ConvertToRadian(const Math::Vector3& _degree)
 	vec3.z = _degree.z * (3.141592f / 180.0f);
 	return vec3;
 }
+
+//===========================================
+//
+// 衝突計算関係
+//
+//===========================================
+// コリジョン計算用の微小値
+constexpr float KdCollisionEpsilon = 0.0001f;

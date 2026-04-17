@@ -9,12 +9,19 @@ VSOutputNoLighting main(
 	float2 uv : TEXCOORD0,		// テクスチャUV座標
 	float4 color : COLOR,		// 頂点カラー
 	float3 normal : NORMAL,		// 法線
-	float3 tangent : TANGENT)	// 接線
+	float3 tangent : TANGENT,	// 接線
+	uint instanceId : SV_InstanceID)
 {
 	VSOutputNoLighting Out;
 
+	row_major float4x4 mWorld = g_mWorld;
+	if (g_UseInstancing)
+	{
+		mWorld = g_mInstanceWorld[instanceId];
+	}
+
 	// 座標変換
-	Out.Pos = mul(pos, g_mWorld);		// ローカル座標系 -> ワールド座標系へ変換
+	Out.Pos = mul(pos, mWorld);		// ローカル座標系 -> ワールド座標系へ変換
 	Out.wPos = Out.Pos.xyz;				// ワールド座標を別途保存
 	Out.Pos = mul(Out.Pos, g_mView);	// ワールド座標系 -> ビュー座標系へ変換
 	Out.Pos = mul(Out.Pos, g_mProj);	// ビュー座標系 -> 射影座標系へ変換

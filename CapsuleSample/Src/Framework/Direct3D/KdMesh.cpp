@@ -107,3 +107,17 @@ void KdMesh::DrawSubset(int subsetNo) const
 	// 描画
 	KdDirect3D::Instance().WorkDevContext()->DrawIndexed(m_subsets[subsetNo].FaceCount * 3, m_subsets[subsetNo].FaceStart * 3, 0);
 }
+
+void KdMesh::DrawSubsetInstanced(int subsetNo, UINT instanceCount) const
+{
+	// 範囲外のサブセットはスキップ
+	if (subsetNo >= (int)m_subsets.size())return;
+	// 面数が0なら描画スキップ
+	if (m_subsets[subsetNo].FaceCount == 0)return;
+	// インスタンス数が無いなら描画スキップ
+	if (instanceCount == 0)return;
+
+	// 描画
+	KdDirect3D::Instance().WorkDevContext()->DrawIndexedInstanced(
+		m_subsets[subsetNo].FaceCount * 3, instanceCount, m_subsets[subsetNo].FaceStart * 3, 0, 0);
+}

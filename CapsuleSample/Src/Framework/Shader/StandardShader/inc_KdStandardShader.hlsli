@@ -20,6 +20,14 @@ cbuffer cbMesh : register(b1)
 	row_major float4x4 g_mWorld; // ワールド変換行列
 };
 
+cbuffer cbInstancing : register(b4)
+{
+	int g_UseInstancing;
+	float3 _instancingBlank;
+
+	row_major float4x4 g_mInstanceWorld[256];
+};
+
 cbuffer cbMaterial : register(b2)
 {
 	float4	g_BaseColor; // ベース色

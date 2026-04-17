@@ -9,6 +9,7 @@ class KdStandardShader
 public:
 	// スキンメッシュ対応
 	static const int maxBoneBufferSize = 300;
+	static const UINT maxInstanceDrawCount = 256;
 
 	// 定数バッファ(オブジェクト単位更新)
 	struct cbObject
@@ -37,6 +38,14 @@ public:
 	struct cbMesh
 	{
 		Math::Matrix	mW;
+	};
+
+	struct cbInstancing
+	{
+		int				UseInstancing = 0;
+		Math::Vector3	_blank = Math::Vector3::Zero;
+
+		Math::Matrix	mWorlds[maxInstanceDrawCount];
 	};
 
 	// 定数バッファ(マテリアル単位更新)
@@ -139,6 +148,7 @@ public:
 
 	// スキンメッシュ対応
 	const cbBone& WorkBoneCB() const { return m_cb3_Bone.Get(); }
+	const cbInstancing& WorkInstancingCB() const { return m_cb4_Instancing.Get(); }
 
 	//================================================
 	// 描画準備
@@ -165,9 +175,13 @@ public:
 	// モデルデータ描画：アニメーションに非対応
 	void DrawModel(const KdModelData& rModel, const Math::Matrix& mWorld = Math::Matrix::Identity, 
 		const Math::Color& colRate = kWhiteColor, const Math::Vector3& emissive = Math::Vector3::Zero);
+	void DrawModel(const KdModelData& rModel, const std::vector<Math::Matrix>& instanceWorlds,
+		const Math::Color& colRate = kWhiteColor, const Math::Vector3& emissive = Math::Vector3::Zero);
 
 	// モデルワーク描画：アニメーションに対応
 	void DrawModel(KdModelWork& rModel, const Math::Matrix& mWorld = Math::Matrix::Identity,
+		const Math::Color& colRate = kWhiteColor, const Math::Vector3& emissive = Math::Vector3::Zero);
+	void DrawModel(KdModelWork& rModel, const std::vector<Math::Matrix>& instanceWorlds,
 		const Math::Color& colRate = kWhiteColor, const Math::Vector3& emissive = Math::Vector3::Zero);
 
 	// 任意の頂点群からなるポリゴン描画
@@ -198,12 +212,15 @@ private:
 
 	// マテリアルのセット
 	void WriteMaterial(const KdMaterial& material, const Math::Vector4& colRate, const Math::Vector3& emiRate);
+	void DrawMeshInstanced(const KdMesh* mesh, UINT instanceCount, const std::vector<KdMaterial>& materials,
+		const Math::Vector4& col, const Math::Vector3& emissive);
 
 	// ポリゴンの法線情報を2Dように書き換える
 	void ConvertNormalsFor2D(std::vector<KdPolygon::Vertex>& target, const Math::Matrix& mWorld);
 
 	// 定数バッファを初期状態に戻す
 	void ResetCBObject();
+	void SetInstancingEnable(bool enable);
 
 	// スキンメッシュ有効かどうか(スキンメッシュ対応)
 	void SetIsSkinMeshObj(bool isSkinMEshObj)
@@ -247,6 +264,7 @@ private:
 	KdConstantBuffer<cbMesh>		m_cb1_Mesh;				// メッシュ毎に更新
 	KdConstantBuffer<cbMaterial>	m_cb2_Material;			// マテリアル毎に更新
 	KdConstantBuffer<cbBone>		m_cb3_Bone;				// ボーン事に更新(スキンメッシュ対応「)
+	KdConstantBuffer<cbInstancing>	m_cb4_Instancing;		// インスタンシング描画用
 
 	KdRenderTargetPack	m_depthMapFromLightRTPack;
 	KdRenderTargetChanger m_depthMapFromLightRTChanger;
