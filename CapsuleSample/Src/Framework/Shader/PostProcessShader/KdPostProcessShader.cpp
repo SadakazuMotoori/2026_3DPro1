@@ -71,11 +71,26 @@ bool KdPostProcessShader::Init()
 		}
 	}
 
+	{
+#include "KdPostProcessShader_PS_LightShaft.shaderInc"
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreatePixelShader(
+			compiledBuffer, sizeof(compiledBuffer), nullptr, &m_PS_LightShaft)))
+		{
+			assert(0 && "ピクセルシェーダー作成失敗");
+			Release();
+
+			return false;
+		}
+	}
+
 	m_cb0_BlurInfo.Create();
 
 	m_cb0_DoFInfo.Create();
 
 	m_cb0_BrightInfo.Create();
+
+	m_cb0_LightShaftInfo.Create();
 
 	const std::shared_ptr<KdTexture>& backBuffer = KdDirect3D::Instance().GetBackBuffer();
 	
@@ -90,6 +105,8 @@ bool KdPostProcessShader::Init()
 	m_depthOfFieldRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
 	
 	m_brightEffectRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
+
+	m_lightShaftRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
 
 	int lightBloomWidth = m_brightEffectRTPack.m_RTTexture->GetWidth();
 	int lightBloomHeight = m_brightEffectRTPack.m_RTTexture->GetHeight();
@@ -126,10 +143,12 @@ void KdPostProcessShader::Release()
 	KdSafeRelease(m_PS_Blur);
 	KdSafeRelease(m_PS_DoF);
 	KdSafeRelease(m_PS_Bright);
+	KdSafeRelease(m_PS_LightShaft);
 
 	m_cb0_BlurInfo.Release();
 	m_cb0_DoFInfo.Release();
 	m_cb0_BrightInfo.Release();
+	m_cb0_LightShaftInfo.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -180,6 +199,7 @@ void KdPostProcessShader::PostEffectProcess()
 	m_postEffectRTChanger.UndoRenderTarget();
 
 	LightBloomProcess();
+	LightShaftProcess();
 	BlurProcess();
 	DepthOfFieldProcess();
 
@@ -242,15 +262,29 @@ void KdPostProcessShader::DepthOfFieldProcess()
 {
 	SetDoFToDevice();
 
-	std::shared_ptr<KdTexture> srcTexList[4] =
+	std::shared_ptr<KdTexture> srcTexList[5] =
 	{
 		m_postEffectRTPack.m_RTTexture,
 		m_blurRTPack.m_RTTexture,
 		m_strongBlurRTPack.m_RTTexture,
-		m_postEffectRTPack.m_ZBuffer
+		m_postEffectRTPack.m_ZBuffer,
+		m_lightShaftRTPack.m_RTTexture
 	};
 
-	DrawTexture(srcTexList, 4, m_depthOfFieldRTPack.m_RTTexture, &m_depthOfFieldRTPack.m_viewPort);
+	DrawTexture(srcTexList, 5, m_depthOfFieldRTPack.m_RTTexture, &m_depthOfFieldRTPack.m_viewPort);
+}
+
+void KdPostProcessShader::LightShaftProcess()
+{
+	SetLightShaftToDevice();
+
+	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Point_Clamp);
+
+	m_lightShaftRTPack.ClearTexture(kBlueColor);
+
+	DrawTexture(&m_postEffectRTPack.m_ZBuffer, 1, m_lightShaftRTPack.m_RTTexture, &m_lightShaftRTPack.m_viewPort);
+
+	KdShaderManager::Instance().UndoSamplerState();
 }
 
 void KdPostProcessShader::CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingRadius, const Math::Vector2& dir)
@@ -437,4 +471,23 @@ void KdPostProcessShader::SetBrightToDevice()
 	}
 
 	shaderMgr.SetPixelShader(m_PS_Bright);
+}
+
+void KdPostProcessShader::SetLightShaftToDevice()
+{
+	ID3D11DeviceContext* DevCon = KdDirect3D::Instance().WorkDevContext();
+	if (!DevCon) { return; }
+
+	m_cb0_LightShaftInfo.Write();
+
+	KdDirect3D::Instance().WorkDevContext()->PSSetConstantBuffers(0, 1, m_cb0_LightShaftInfo.GetAddress());
+
+	KdShaderManager& shaderMgr = KdShaderManager::Instance();
+
+	if (shaderMgr.SetVertexShader(m_VS))
+	{
+		DevCon->IASetInputLayout(m_inputLayout);
+	}
+
+	shaderMgr.SetPixelShader(m_PS_LightShaft);
 }

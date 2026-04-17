@@ -5,6 +5,7 @@ Texture2D g_inputTex	: register(t0);
 Texture2D g_blurTex		: register(t1);
 Texture2D g_strongBlurTex : register(t2);
 Texture2D g_depthTex	: register(t3);
+Texture2D g_lightShaftTex : register(t4);
 
 SamplerState g_ss : register(s0);
 
@@ -41,6 +42,11 @@ float4 main(VSOutput In) : SV_Target0
 	color += g_inputTex.Sample( g_ss, In.UV ).rgb * defaultPow;
 	color += g_blurTex.Sample(g_ss, In.UV).rgb * blurPow;
 	color += g_strongBlurTex.Sample(g_ss, In.UV).rgb * strongBlurPow;
+
+	float4 lightShaft = g_lightShaftTex.Sample(g_ss, In.UV);
+	float lightShaftDepthRate = saturate(depth * 1.2f);
+	float lightShaftRate = saturate(lightShaft.a * lightShaftDepthRate);
+	color = lerp(color, lightShaft.rgb, lightShaftRate);
 
 	return float4(color, 1);
 }

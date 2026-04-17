@@ -15,6 +15,8 @@ public:
 	void SetFocusRange(float fore, float back) { m_cb0_DoFInfo.Work().FocusForeRange = fore; m_cb0_DoFInfo.Work().FocusBackRange = back; }
 
 	void SetBrightThreshold(float threshold) { m_cb0_BrightInfo.Work().Threshold = threshold; }
+	void SetLightShaftStrength(float strength) { m_cb0_LightShaftInfo.Work().Strength = strength; }
+	void SetLightShaftColor(const Math::Vector3& color) { m_cb0_LightShaftInfo.Work().Color = color; }
 
 	struct Vertex
 	{
@@ -39,6 +41,7 @@ private:
 
 	void BlurProcess();
 	void LightBloomProcess();
+	void LightShaftProcess();
 	void DepthOfFieldProcess();
 
 	void CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingSize, const Math::Vector2& dir);
@@ -51,6 +54,7 @@ private:
 	void SetBlurToDevice();
 	void SetDoFToDevice();
 	void SetBrightToDevice();
+	void SetLightShaftToDevice();
 
 	ID3D11VertexShader* m_VS = nullptr;
 	ID3D11InputLayout* m_inputLayout = nullptr;
@@ -58,6 +62,7 @@ private:
 	ID3D11PixelShader* m_PS_Blur = nullptr;
 	ID3D11PixelShader* m_PS_DoF = nullptr;
 	ID3D11PixelShader* m_PS_Bright = nullptr;
+	ID3D11PixelShader* m_PS_LightShaft = nullptr;
 
 	static const int kBlurSamplingRadius = 8;
 	static const int kLightBloomSamplingRadius = 4;
@@ -91,6 +96,23 @@ private:
 	};
 	KdConstantBuffer<cbBrightFilter>	m_cb0_BrightInfo;
 
+	struct cbLightShaft
+	{
+		float Density = 0.96f;
+		float Weight = 0.08f;
+		float Decay = 0.95f;
+		float Strength = 0.35f;
+
+		Math::Vector3 Color = Math::Vector3::Zero;
+		float _blank = 0.0f;
+
+		float SunDistance = 60.0f;
+		float DepthThreshold = 0.9995f;
+		float ScreenFadeStart = 1.0f;
+		float ScreenFadeEnd = 1.35f;
+	};
+	KdConstantBuffer<cbLightShaft>	m_cb0_LightShaftInfo;
+
 	KdRenderTargetPack	m_postEffectRTPack;
 
 	KdRenderTargetPack	m_blurRTPack;
@@ -99,6 +121,7 @@ private:
 	KdRenderTargetPack	m_depthOfFieldRTPack;
 
 	KdRenderTargetPack	m_brightEffectRTPack;
+	KdRenderTargetPack	m_lightShaftRTPack;
 	static const int	kLightBloomNum = 4;
 	KdRenderTargetPack	m_lightBloomRTPack[kLightBloomNum];
 
