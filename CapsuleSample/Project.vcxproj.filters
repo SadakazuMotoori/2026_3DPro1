@@ -112,6 +112,9 @@
     <Filter Include="Src\Application\GameObject\Camera\CCTVCamera">
       <UniqueIdentifier>{fa44ec34-d6e1-4c24-aeee-7e47c1e39951}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Src\Application\GameObject\Map\Stage01\Mirror">
+      <UniqueIdentifier>{993c4334-ac38-44dd-951a-3592deb01e6c}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Pch.h">
@@ -324,6 +327,9 @@
     <ClInclude Include="Src\Application\GameObject\Camera\CCTVCamera\CCTVCamera.h">
       <Filter>Src\Application\GameObject\Camera\CCTVCamera</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Application\GameObject\Map\Stage01\Mirror\Mirror.h">
+      <Filter>Src\Application\GameObject\Map\Stage01\Mirror</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Pch.cpp">
@@ -505,6 +511,9 @@
     </ClCompile>
     <ClCompile Include="Src\Application\GameObject\Camera\CCTVCamera\CCTVCamera.cpp">
       <Filter>Src\Application\GameObject\Camera\CCTVCamera</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Application\GameObject\Map\Stage01\Mirror\Mirror.cpp">
+      <Filter>Src\Application\GameObject\Map\Stage01\Mirror</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

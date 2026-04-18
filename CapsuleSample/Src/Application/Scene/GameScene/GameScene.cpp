@@ -5,6 +5,7 @@
 #include "../../GameObject/Camera/TPSCamera/TPSCamera.h"
 
 #include "../../GameObject/Map/Stage01/Stage01.h"
+#include "../../GameObject/Map/Stage01/Mirror/Mirror.h"
 #include "../../GameObject/Character/Player/SkinMeshMan/SkinMeshMan.h"
 #include "../../GameObject/Character/Enemy/Enemy01/Enemy01.h"
 #include "../../GameObject/Effect/LensFlare/LensFlare.h"
@@ -29,6 +30,10 @@ void GameScene::Init()
 	_stage->Init();
 	AddObject(_stage);
 
+	std::shared_ptr<Mirror> _mirror = std::make_shared<Mirror>();
+	_mirror->Init();
+	AddObject(_mirror);
+	
 	//===================================================================
 	// キャラクター初期化
 	//===================================================================
