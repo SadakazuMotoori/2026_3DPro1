@@ -84,6 +84,32 @@ bool KdPostProcessShader::Init()
 		}
 	}
 
+	{
+#include "KdPostProcessShader_PS_SSPRResolve.shaderInc"
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreatePixelShader(
+			compiledBuffer, sizeof(compiledBuffer), nullptr, &m_PS_SSPRResolve)))
+		{
+			assert(0 && "ピクセルシェーダー作成失敗");
+			Release();
+
+			return false;
+		}
+	}
+
+	{
+#include "KdPostProcessShader_CS_SSPRProject.shaderInc"
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreateComputeShader(
+			compiledBuffer, sizeof(compiledBuffer), nullptr, &m_CS_SSPRProject)))
+		{
+			assert(0 && "コンピュートシェーダー作成失敗");
+			Release();
+
+			return false;
+		}
+	}
+
 	m_cb0_BlurInfo.Create();
 
 	m_cb0_DoFInfo.Create();
@@ -91,11 +117,13 @@ bool KdPostProcessShader::Init()
 	m_cb0_BrightInfo.Create();
 
 	m_cb0_LightShaftInfo.Create();
+	m_cb1_SSPRInfo.Create();
 
 	const std::shared_ptr<KdTexture>& backBuffer = KdDirect3D::Instance().GetBackBuffer();
 	
 	// ポストプロセス用のシーンの全描画用画像
 	m_postEffectRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight(), true);
+	m_ssprRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
 
 	// ぼかし画像
 	m_blurRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
@@ -118,6 +146,49 @@ bool KdPostProcessShader::Init()
 
 		lightBloomWidth /= 2;
 		lightBloomHeight /= 2;
+	}
+
+	{
+		// ComputeShader は「どの画素がどの鏡面画素へ対応するか」だけを別テクスチャへ書き出す。
+		D3D11_TEXTURE2D_DESC desc = {};
+		desc.Width = backBuffer->GetWidth();
+		desc.Height = backBuffer->GetHeight();
+		desc.MipLevels = 1;
+		desc.ArraySize = 1;
+		desc.Format = DXGI_FORMAT_R32_UINT;
+		desc.SampleDesc.Count = 1;
+		desc.Usage = D3D11_USAGE_DEFAULT;
+		desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreateTexture2D(&desc, nullptr, &m_ssprInfoTex)))
+		{
+			assert(0 && "SSPR情報テクスチャ作成失敗");
+			Release();
+			return false;
+		}
+
+		D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+		srvDesc.Format = desc.Format;
+		srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+		srvDesc.Texture2D.MipLevels = 1;
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreateShaderResourceView(m_ssprInfoTex, &srvDesc, &m_ssprInfoSRV)))
+		{
+			assert(0 && "SSPR情報SRV作成失敗");
+			Release();
+			return false;
+		}
+
+		D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+		uavDesc.Format = desc.Format;
+		uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreateUnorderedAccessView(m_ssprInfoTex, &uavDesc, &m_ssprInfoUAV)))
+		{
+			assert(0 && "SSPR情報UAV作成失敗");
+			Release();
+			return false;
+		}
 	}
 
 	// 画面全体に書き込む用の頂点情報
@@ -144,11 +215,17 @@ void KdPostProcessShader::Release()
 	KdSafeRelease(m_PS_DoF);
 	KdSafeRelease(m_PS_Bright);
 	KdSafeRelease(m_PS_LightShaft);
+	KdSafeRelease(m_PS_SSPRResolve);
+	KdSafeRelease(m_CS_SSPRProject);
+	KdSafeRelease(m_ssprInfoSRV);
+	KdSafeRelease(m_ssprInfoUAV);
+	KdSafeRelease(m_ssprInfoTex);
 
 	m_cb0_BlurInfo.Release();
 	m_cb0_DoFInfo.Release();
 	m_cb0_BrightInfo.Release();
 	m_cb0_LightShaftInfo.Release();
+	m_cb1_SSPRInfo.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -156,8 +233,12 @@ void KdPostProcessShader::Release()
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 void KdPostProcessShader::Draw()
 {
+	m_cb1_SSPRInfo.Work().MirrorCount = 0;
+	m_useSSPRScene = false;
+
 	// ポストエフェクトテクスチャの描画クリア
 	m_postEffectRTPack.ClearTexture();
+	m_ssprRTPack.ClearTexture();
 
 	// 光源描画テクスチャの描画クリア
 	m_brightEffectRTPack.ClearTexture(kBlackColor);
@@ -168,6 +249,28 @@ void KdPostProcessShader::Draw()
 		// 失敗したらUndo
 		m_postEffectRTChanger.UndoRenderTarget();
 	}
+}
+
+void KdPostProcessShader::AddSSPRPlane(const Math::Vector3& pos, const Math::Vector3& normal,
+	const Math::Vector3& right, const Math::Vector3& up,
+	float halfWidth, float halfHeight, float reflectionStrength, float roughness)
+{
+	auto& sspr = m_cb1_SSPRInfo.Work();
+	if (sspr.MirrorCount >= kMaxSSPRMirrorNum) return;
+
+	const int mirrorIndex = sspr.MirrorCount;
+	sspr.PlanePosStrength[mirrorIndex] = { pos.x, pos.y, pos.z, reflectionStrength };
+	sspr.PlaneNormalBias[mirrorIndex] = { normal.x, normal.y, normal.z, 0.05f };
+	sspr.PlaneRightHalfWidth[mirrorIndex] = { right.x, right.y, right.z, halfWidth };
+	sspr.PlaneUpHalfHeight[mirrorIndex] = { up.x, up.y, up.z, halfHeight };
+	sspr.PlaneParams[mirrorIndex] = { roughness, 0.0f, 0.0f, 0.0f };
+
+	sspr.MirrorCount++;
+}
+
+std::shared_ptr<KdTexture> KdPostProcessShader::GetWorkingSceneTex() const
+{
+	return m_useSSPRScene ? m_ssprRTPack.m_RTTexture : m_postEffectRTPack.m_RTTexture;
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -198,6 +301,8 @@ void KdPostProcessShader::PostEffectProcess()
 {
 	m_postEffectRTChanger.UndoRenderTarget();
 
+	// 鏡面反射は scene color を作り替える処理なので、他の post effect より先に行う。
+	SSPRProcess();
 	LightBloomProcess();
 	LightShaftProcess();
 	BlurProcess();
@@ -213,7 +318,8 @@ void KdPostProcessShader::LightBloomProcess()
 	KdShaderManager::Instance().ChangeBlendState(KdBlendState::Add);
 
 	// 高輝度抽出
-	DrawTexture(&m_postEffectRTPack.m_RTTexture, 1, m_brightEffectRTPack.m_RTTexture, &m_brightEffectRTPack.m_viewPort);
+	std::shared_ptr<KdTexture> sceneTex = GetWorkingSceneTex();
+	DrawTexture(&sceneTex, 1, m_brightEffectRTPack.m_RTTexture, &m_brightEffectRTPack.m_viewPort);
 
 	KdShaderManager::Instance().UndoBlendState();
 
@@ -230,7 +336,7 @@ void KdPostProcessShader::LightBloomProcess()
 	}
 
 	KdRenderTargetChanger RTChanger;
-	RTChanger.ChangeRenderTarget(m_postEffectRTPack);
+	RTChanger.ChangeRenderTarget(sceneTex, nullptr, &m_postEffectRTPack.m_viewPort);
 
 	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Linear_Clamp);
 
@@ -239,7 +345,7 @@ void KdPostProcessShader::LightBloomProcess()
 	// 光源ぼかし画像の合成
 	for (int i = 0; i < kLightBloomNum; ++i)
 	{
-		KdShaderManager::Instance().m_spriteShader.DrawTex(m_lightBloomRTPack[i].m_RTTexture.get(), 0, 0, m_postEffectRTPack.m_RTTexture->GetWidth(), m_postEffectRTPack.m_RTTexture->GetHeight());
+		KdShaderManager::Instance().m_spriteShader.DrawTex(m_lightBloomRTPack[i].m_RTTexture.get(), 0, 0, sceneTex->GetWidth(), sceneTex->GetHeight());
 	}
 
 	RTChanger.UndoRenderTarget();
@@ -253,7 +359,8 @@ void KdPostProcessShader::BlurProcess()
 {
 	SetBlurToDevice();
 
-	GenerateBlurTexture(m_postEffectRTPack.m_RTTexture, m_blurRTPack.m_RTTexture, m_blurRTPack.m_viewPort, kBlurSamplingRadius);
+	std::shared_ptr<KdTexture> sceneTex = GetWorkingSceneTex();
+	GenerateBlurTexture(sceneTex, m_blurRTPack.m_RTTexture, m_blurRTPack.m_viewPort, kBlurSamplingRadius);
 
 	GenerateBlurTexture(m_blurRTPack.m_RTTexture, m_strongBlurRTPack.m_RTTexture, m_strongBlurRTPack.m_viewPort, kBlurSamplingRadius);
 }
@@ -264,7 +371,7 @@ void KdPostProcessShader::DepthOfFieldProcess()
 
 	std::shared_ptr<KdTexture> srcTexList[5] =
 	{
-		m_postEffectRTPack.m_RTTexture,
+		GetWorkingSceneTex(),
 		m_blurRTPack.m_RTTexture,
 		m_strongBlurRTPack.m_RTTexture,
 		m_postEffectRTPack.m_ZBuffer,
@@ -285,6 +392,76 @@ void KdPostProcessShader::LightShaftProcess()
 	DrawTexture(&m_postEffectRTPack.m_ZBuffer, 1, m_lightShaftRTPack.m_RTTexture, &m_lightShaftRTPack.m_viewPort);
 
 	KdShaderManager::Instance().UndoSamplerState();
+}
+
+void KdPostProcessShader::SSPRProcess()
+{
+	if (m_cb1_SSPRInfo.Work().MirrorCount <= 0) return;
+	if (!m_CS_SSPRProject || !m_PS_SSPRResolve) return;
+	if (!m_ssprInfoUAV || !m_ssprInfoSRV) return;
+
+	const auto& camera = KdShaderManager::Instance().GetCameraCB();
+	auto& ssprInfo = m_cb1_SSPRInfo.Work();
+
+	ssprInfo.View = camera.mView;
+	ssprInfo.Proj = camera.mProj;
+	ssprInfo.ProjInv = camera.mProjInv;
+	ssprInfo.ViewInv = camera.mView.Invert();
+	ssprInfo.ScreenSize = {
+		static_cast<float>(m_postEffectRTPack.m_RTTexture->GetWidth()),
+		static_cast<float>(m_postEffectRTPack.m_RTTexture->GetHeight())
+	};
+	ssprInfo.InvScreenSize = {
+		1.0f / ssprInfo.ScreenSize.x,
+		1.0f / ssprInfo.ScreenSize.y
+	};
+	m_cb1_SSPRInfo.Write();
+
+	ID3D11DeviceContext* devCon = KdDirect3D::Instance().WorkDevContext();
+	if (!devCon) return;
+
+	UINT clearValues[4] = { 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF };
+	devCon->ClearUnorderedAccessViewUint(m_ssprInfoUAV, clearValues);
+
+	// 1段目の CS は、元画面の各画素を鏡で反転させたときの投影先だけを作る。
+	devCon->CSSetShader(m_CS_SSPRProject, nullptr, 0);
+	devCon->CSSetConstantBuffers(1, 1, m_cb1_SSPRInfo.GetAddress());
+	devCon->CSSetShaderResources(0, 1, m_postEffectRTPack.m_ZBuffer->WorkSRViewAddress());
+	devCon->CSSetUnorderedAccessViews(0, 1, &m_ssprInfoUAV, nullptr);
+
+	const UINT groupX = (m_postEffectRTPack.m_RTTexture->GetWidth() + 7) / 8;
+	const UINT groupY = (m_postEffectRTPack.m_RTTexture->GetHeight() + 7) / 8;
+	devCon->Dispatch(groupX, groupY, 1);
+
+	ID3D11ShaderResourceView* nullSRV = nullptr;
+	ID3D11UnorderedAccessView* nullUAV = nullptr;
+	devCon->CSSetShaderResources(0, 1, &nullSRV);
+	devCon->CSSetUnorderedAccessViews(0, 1, &nullUAV, nullptr);
+	devCon->CSSetShader(nullptr, nullptr, 0);
+
+	// 2段目の PS は、投影結果と roughness を使って最終的な反射色へ戻す。
+	SetSSPRResolveToDevice();
+
+	KdRenderTargetChanger rtChanger;
+	rtChanger.ChangeRenderTarget(m_ssprRTPack);
+
+	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Linear_Clamp);
+
+	devCon->PSSetShaderResources(0, 1, m_postEffectRTPack.m_RTTexture->WorkSRViewAddress());
+	devCon->PSSetShaderResources(1, 1, &m_ssprInfoSRV);
+	devCon->PSSetShaderResources(2, 1, m_postEffectRTPack.m_ZBuffer->WorkSRViewAddress());
+
+	KdDirect3D::Instance().DrawVertices(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP, 4, &m_screenVert[0], sizeof(Vertex));
+
+	devCon->PSSetShaderResources(0, 1, &nullSRV);
+	devCon->PSSetShaderResources(1, 1, &nullSRV);
+	devCon->PSSetShaderResources(2, 1, &nullSRV);
+
+	KdShaderManager::Instance().UndoSamplerState();
+
+	rtChanger.UndoRenderTarget();
+
+	m_useSSPRScene = true;
 }
 
 void KdPostProcessShader::CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingRadius, const Math::Vector2& dir)
@@ -490,4 +667,23 @@ void KdPostProcessShader::SetLightShaftToDevice()
 	}
 
 	shaderMgr.SetPixelShader(m_PS_LightShaft);
+}
+
+void KdPostProcessShader::SetSSPRResolveToDevice()
+{
+	ID3D11DeviceContext* DevCon = KdDirect3D::Instance().WorkDevContext();
+	if (!DevCon) { return; }
+
+	m_cb1_SSPRInfo.Write();
+
+	DevCon->PSSetConstantBuffers(1, 1, m_cb1_SSPRInfo.GetAddress());
+
+	KdShaderManager& shaderMgr = KdShaderManager::Instance();
+
+	if (shaderMgr.SetVertexShader(m_VS))
+	{
+		DevCon->IASetInputLayout(m_inputLayout);
+	}
+
+	shaderMgr.SetPixelShader(m_PS_SSPRResolve);
 }

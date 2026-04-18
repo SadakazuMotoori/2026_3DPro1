@@ -18,6 +18,21 @@
 			"name":"\u5e73\u9762"
 		}
 	],
+	"materials":[
+		{
+			"doubleSided":true,
+			"name":"Reflection",
+			"pbrMetallicRoughness":{
+				"baseColorFactor":[
+					0.800000011920929,
+					0.800000011920929,
+					0.800000011920929,
+					1
+				],
+				"roughnessFactor":0
+			}
+		}
+	],
 	"meshes":[
 		{
 			"name":"\u5e73\u9762",
@@ -28,7 +43,8 @@
 						"NORMAL":1,
 						"TEXCOORD_0":2
 					},
-					"indices":3
+					"indices":3,
+					"material":0
 				}
 			]
 		}

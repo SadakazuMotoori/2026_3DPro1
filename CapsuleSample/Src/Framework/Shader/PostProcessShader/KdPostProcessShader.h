@@ -17,6 +17,9 @@ public:
 	void SetBrightThreshold(float threshold) { m_cb0_BrightInfo.Work().Threshold = threshold; }
 	void SetLightShaftStrength(float strength) { m_cb0_LightShaftInfo.Work().Strength = strength; }
 	void SetLightShaftColor(const Math::Vector3& color) { m_cb0_LightShaftInfo.Work().Color = color; }
+	void AddSSPRPlane(const Math::Vector3& pos, const Math::Vector3& normal,
+		const Math::Vector3& right, const Math::Vector3& up,
+		float halfWidth, float halfHeight, float reflectionStrength, float roughness);
 
 	struct Vertex
 	{
@@ -43,6 +46,7 @@ private:
 	void LightBloomProcess();
 	void LightShaftProcess();
 	void DepthOfFieldProcess();
+	void SSPRProcess();
 
 	void CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingSize, const Math::Vector2& dir);
 
@@ -55,6 +59,9 @@ private:
 	void SetDoFToDevice();
 	void SetBrightToDevice();
 	void SetLightShaftToDevice();
+	void SetSSPRResolveToDevice();
+
+	std::shared_ptr<KdTexture> GetWorkingSceneTex() const;
 
 	ID3D11VertexShader* m_VS = nullptr;
 	ID3D11InputLayout* m_inputLayout = nullptr;
@@ -63,6 +70,8 @@ private:
 	ID3D11PixelShader* m_PS_DoF = nullptr;
 	ID3D11PixelShader* m_PS_Bright = nullptr;
 	ID3D11PixelShader* m_PS_LightShaft = nullptr;
+	ID3D11PixelShader* m_PS_SSPRResolve = nullptr;
+	ID3D11ComputeShader* m_CS_SSPRProject = nullptr;
 
 	static const int kBlurSamplingRadius = 8;
 	static const int kLightBloomSamplingRadius = 4;
@@ -113,7 +122,30 @@ private:
 	};
 	KdConstantBuffer<cbLightShaft>	m_cb0_LightShaftInfo;
 
+	static const int kMaxSSPRMirrorNum = 16;
+	struct cbSSPR
+	{
+		Math::Matrix View = Math::Matrix::Identity;
+		Math::Matrix Proj = Math::Matrix::Identity;
+		Math::Matrix ProjInv = Math::Matrix::Identity;
+		Math::Matrix ViewInv = Math::Matrix::Identity;
+
+		Math::Vector2 ScreenSize = { 1.0f, 1.0f };
+		Math::Vector2 InvScreenSize = { 1.0f, 1.0f };
+		int MirrorCount = 0;
+		float _blank0[3] = { 0.0f, 0.0f, 0.0f };
+
+		// 1枚ごとの鏡面情報を float4 に詰めておくと、C++ と HLSL の並びを揃えやすい。
+		Math::Vector4 PlanePosStrength[kMaxSSPRMirrorNum] = {};
+		Math::Vector4 PlaneNormalBias[kMaxSSPRMirrorNum] = {};
+		Math::Vector4 PlaneRightHalfWidth[kMaxSSPRMirrorNum] = {};
+		Math::Vector4 PlaneUpHalfHeight[kMaxSSPRMirrorNum] = {};
+		Math::Vector4 PlaneParams[kMaxSSPRMirrorNum] = {};
+	};
+	KdConstantBuffer<cbSSPR>	m_cb1_SSPRInfo;
+
 	KdRenderTargetPack	m_postEffectRTPack;
+	KdRenderTargetPack	m_ssprRTPack;
 
 	KdRenderTargetPack	m_blurRTPack;
 	KdRenderTargetPack	m_strongBlurRTPack;
@@ -129,4 +161,11 @@ private:
 	KdRenderTargetChanger m_brightRTChanger;
 
 	Vertex m_screenVert[4];
+
+	// CS が投影先対応表を書き込み、PS がそれを読んで反射色へ戻す。
+	ID3D11Texture2D* m_ssprInfoTex = nullptr;
+	ID3D11ShaderResourceView* m_ssprInfoSRV = nullptr;
+	ID3D11UnorderedAccessView* m_ssprInfoUAV = nullptr;
+
+	bool m_useSSPRScene = false;
 };

@@ -19,5 +19,6 @@ x64/
 *.db
 *.suo
 *.inc
+*.shaderInc
 
 imgui.ini
