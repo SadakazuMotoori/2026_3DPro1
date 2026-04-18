@@ -151,76 +151,40 @@ float4 main(VSOutput In) : SV_Target0
 	float reflectionStrength = GetReflectionStrength(mirrorIdx);
 	float roughness = GetRoughness(mirrorIdx);
 	float blurAmount = saturate((roughness - 0.1f) / 0.9f);
-	blurAmount = pow(blurAmount, 0.3f);
-	float2 blurStep = g_invScreenSize * lerp(1.0f, 12.0f, blurAmount);
-	float sigma = lerp(0.85f, 3.2f, blurAmount);
+	blurAmount = pow(blurAmount, 0.5f);
+	float maxSampleRadius = lerp(2.0f, 4.0f, blurAmount);
+	float sigma = lerp(0.85f, 2.4f, blurAmount);
 
 	uint2 pixelPos = uint2(In.Pos.xy);
-	float2 srcUV;
-	if (!DecodeProjection(g_projectionTex.Load(int3(pixelPos, 0)), srcUV))
-	{
-		bool foundProjection = false;
-
-		for (int searchRadius = 1; searchRadius <= 2 && !foundProjection; ++searchRadius)
-		{
-			for (int y = -searchRadius; y <= searchRadius && !foundProjection; ++y)
-			{
-				for (int x = -searchRadius; x <= searchRadius; ++x)
-				{
-					int2 samplePos = int2(pixelPos) + int2(x, y);
-					if (samplePos.x < 0 || samplePos.y < 0 || samplePos.x >= g_screenSize.x || samplePos.y >= g_screenSize.y)
-					{
-						continue;
-					}
-
-					if (DecodeProjection(g_projectionTex.Load(int3(samplePos, 0)), srcUV))
-					{
-						foundProjection = true;
-						break;
-					}
-				}
-			}
-		}
-
-		if (!foundProjection)
-		{
-			return baseColor;
-		}
-	}
-
-	float centerDepth = g_depthTex.SampleLevel(g_ss, srcUV, 0).r;
-	float depthSigma = lerp(0.0015f, 0.02f, blurAmount);
 	float4 reflectionColor = 0;
 	float totalWeight = 0;
 
 	// 投影先対応表には欠けが出やすいので、近傍を見ながら埋めて格子模様を抑える。
-	for (int y = -8; y <= 8; ++y)
+	for (int y = -4; y <= 4; ++y)
 	{
 		for (int x = -4; x <= 4; ++x)
 		{
 			float2 tapOffset = float2((float)x, (float)y);
 			float sampleDistance = length(tapOffset);
-			if (sampleDistance > 4.0f)
+			if (sampleDistance > maxSampleRadius)
 			{
 				continue;
 			}
 
-			float2 sampleUV = srcUV + tapOffset * blurStep;
-			if (sampleUV.x < 0.0f || sampleUV.y < 0.0f || sampleUV.x > 1.0f || sampleUV.y > 1.0f)
+			int2 samplePos = int2(pixelPos) + int2(x, y);
+			if (samplePos.x < 0 || samplePos.y < 0 || samplePos.x >= g_screenSize.x || samplePos.y >= g_screenSize.y)
 			{
 				continue;
 			}
 
-			float sampleDepth = g_depthTex.SampleLevel(g_ss, sampleUV, 0).r;
-			float depthWeight = 1.0f;
-			if (centerDepth < 1.0f && sampleDepth < 1.0f)
+			float2 srcUV;
+			if (!DecodeProjection(g_projectionTex.Load(int3(samplePos, 0)), srcUV))
 			{
-				float depthDelta = abs(sampleDepth - centerDepth);
-				depthWeight = exp(-(depthDelta * depthDelta) / (2.0f * depthSigma * depthSigma));
+				continue;
 			}
 
-			float weight = exp(-(sampleDistance * sampleDistance) / (2.0f * sigma * sigma)) * depthWeight;
-			reflectionColor += g_sceneTex.SampleLevel(g_ss, sampleUV, 0) * weight;
+			float weight = exp(-(sampleDistance * sampleDistance) / (2.0f * sigma * sigma));
+			reflectionColor += g_sceneTex.SampleLevel(g_ss, srcUV, 0) * weight;
 			totalWeight += weight;
 		}
 	}
