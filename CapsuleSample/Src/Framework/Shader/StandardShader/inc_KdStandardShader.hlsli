@@ -37,6 +37,20 @@ cbuffer cbMaterial : register(b2)
 };
 
 // ボーン行列配列(スキンメッシュ対応)
+#define KD_DECAL_MAX 16
+
+cbuffer cbDecal : register(b5)
+{
+	int g_DecalNum;
+	float3 g_DecalBlank;
+
+	row_major float4x4 g_mDecalWorldToLocal[KD_DECAL_MAX];
+	float4 g_DecalColor[KD_DECAL_MAX];
+	float4 g_DecalNormalThreshold[KD_DECAL_MAX];
+};
+
+Texture2D g_decalTex : register(t13);
+
 cbuffer cbBones : register(b3)
 {
 	row_major float4x4 g_mBones[300];

@@ -8,6 +8,7 @@
 #include "../../GameObject/Map/Stage01/Mirror/Mirror.h"
 #include "../../GameObject/Character/Player/SkinMeshMan/SkinMeshMan.h"
 #include "../../GameObject/Character/Enemy/Enemy01/Enemy01.h"
+#include "../../GameObject/Effect/Decal.h"
 #include "../../GameObject/Effect/LensFlare/LensFlare.h"
 
 void GameScene::Event()
@@ -33,6 +34,13 @@ void GameScene::Init()
 	std::shared_ptr<Mirror> _mirror = std::make_shared<Mirror>();
 	_mirror->Init();
 	AddObject(_mirror);
+
+	std::shared_ptr<Decal> _decal = std::make_shared<Decal>();
+	_decal->Init();
+	_decal->SetScale({ 2.2f, 0.35f, 2.2f });
+	_decal->SetPos({ 1.0f, 0.05f, 2.5f });
+	_decal->SetColor({ 0.55f, 0.08f, 0.08f, 0.78f });
+	AddObject(_decal);
 	
 	//===================================================================
 	// キャラクター初期化
@@ -64,4 +72,6 @@ void GameScene::Init()
 	_lensFlare->Init();
 	_lensFlare->SetCamera(_camera);
 	AddObject(_lensFlare);
+
+	_decal->SetTarget(_skinmeshMan);
 }

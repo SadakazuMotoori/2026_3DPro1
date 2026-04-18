@@ -29,6 +29,42 @@ float BlinnPhong(float3 lightDir, float3 vCam, float3 normal, float specPower)
 //================================
 // ピクセルシェーダ
 //================================
+float4 ApplyDecalBaseColor(float4 baseColor, float3 worldPos, float3 surfaceNormal)
+{
+	for (int decalIdx = 0; decalIdx < g_DecalNum; ++decalIdx)
+	{
+		float3 decalNormal = normalize(g_DecalNormalThreshold[decalIdx].xyz);
+		if (dot(surfaceNormal, decalNormal) < g_DecalNormalThreshold[decalIdx].w)
+		{
+			continue;
+		}
+
+		float4 localPos = mul(float4(worldPos, 1.0f), g_mDecalWorldToLocal[decalIdx]);
+		if (abs(localPos.x) > 0.5f || abs(localPos.y) > 0.5f || abs(localPos.z) > 0.5f)
+		{
+			continue;
+		}
+
+		float2 decalUV = float2(localPos.x + 0.5f, 1.0f - (localPos.z + 0.5f));
+		float4 decalSample = g_decalTex.SampleLevel(g_ss, decalUV, 0);
+
+		float radialMask = saturate(1.0f - length(localPos.xz * 2.0f));
+		radialMask *= radialMask;
+
+		float thicknessMask = saturate((0.5f - abs(localPos.y)) / 0.15f);
+		float decalAlpha = decalSample.a * g_DecalColor[decalIdx].a * radialMask * thicknessMask;
+		if (decalAlpha <= 0.001f)
+		{
+			continue;
+		}
+
+		float3 decalColor = decalSample.rgb * g_DecalColor[decalIdx].rgb;
+		baseColor.rgb = lerp(baseColor.rgb, decalColor, decalAlpha);
+	}
+
+	return baseColor;
+}
+
 float4 main(VSOutput In) : SV_Target0
 {
 	// ディゾルブによる描画スキップ
@@ -48,6 +84,8 @@ float4 main(VSOutput In) : SV_Target0
 	{
 		discard;
 	}
+
+	float3 surfaceNormal = normalize(In.wN);
 	
 	// カメラへの方向
 	float3 vCam = g_CamPos - In.wPos;
@@ -75,6 +113,7 @@ float4 main(VSOutput In) : SV_Target0
 
 	// 法線正規化
 	wN = normalize(wN);
+	baseColor = ApplyDecalBaseColor(baseColor, In.wPos, surfaceNormal);
 
 	float4 mr = g_metalRoughTex.Sample(g_ss, In.UV);
 	// 金属性

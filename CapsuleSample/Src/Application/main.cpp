@@ -85,6 +85,7 @@ void Application::KdBeginDraw(bool usePostProcess)
 	KdDirect3D::Instance().ClearBackBuffer();
 
 	KdShaderManager::Instance().WorkAmbientController().Draw();
+	KdShaderManager::Instance().m_StandardShader.ClearDecals();
 
 	if (!usePostProcess) return;
 	KdShaderManager::Instance().m_postProcessShader.Draw();

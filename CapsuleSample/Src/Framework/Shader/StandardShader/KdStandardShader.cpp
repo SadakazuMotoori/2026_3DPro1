@@ -30,6 +30,7 @@ void KdStandardShader::BeginLit()
 	{
 		KdShaderManager::Instance().SetPSConstantBuffer(0, m_cb0_Obj.GetAddress());
 		KdShaderManager::Instance().SetPSConstantBuffer(2, m_cb2_Material.GetAddress());
+		KdShaderManager::Instance().SetPSConstantBuffer(5, m_cb5_Decal.GetAddress());
 	}
 
 	// ボーン情報をセット(スキンメッシュ対応)
@@ -37,6 +38,10 @@ void KdStandardShader::BeginLit()
 
 	// シャドウマップのテクスチャをセット
 	KdDirect3D::Instance().WorkDevContext()->PSSetShaderResources(10, 1, m_depthMapFromLightRTPack.m_RTTexture->WorkSRViewAddress());
+
+	ID3D11ShaderResourceView* decalSRV = m_spDecalTex ? m_spDecalTex->WorkSRView() : KdDirect3D::Instance().GetWhiteTex()->WorkSRView();
+	KdDirect3D::Instance().WorkDevContext()->PSSetShaderResources(13, 1, &decalSRV);
+	m_cb5_Decal.Write();
 
 	// 通常テクスチャ用サンプラーのセット
 	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Anisotropic_Wrap, 0);
@@ -54,6 +59,41 @@ void KdStandardShader::EndLit()
 {
 	ID3D11ShaderResourceView* pNullSRV = nullptr;
 	KdDirect3D::Instance().WorkDevContext()->PSSetShaderResources(10, 1, &pNullSRV);
+
+	KdDirect3D::Instance().WorkDevContext()->PSSetShaderResources(13, 1, &pNullSRV);
+}
+
+void KdStandardShader::ClearDecals()
+{
+	m_cb5_Decal.Work() = cbDecal();
+	m_spDecalTex = nullptr;
+}
+
+void KdStandardShader::AddDecal(const Math::Matrix& decalMatrix, const std::shared_ptr<KdTexture>& spTexture,
+	const Math::Color& color, float normalThreshold)
+{
+	auto& decalInfo = m_cb5_Decal.Work();
+	if (decalInfo.DecalNum >= maxDecalNum) { return; }
+
+	const int decalIndex = decalInfo.DecalNum;
+	Math::Vector3 normal = Math::Vector3::TransformNormal(Math::Vector3::Up, decalMatrix);
+	if (normal.LengthSquared() <= 0.0f) { return; }
+	normal.Normalize();
+
+	decalInfo.WorldToDecal[decalIndex] = decalMatrix.Invert();
+	decalInfo.Color[decalIndex] = color;
+	decalInfo.NormalThreshold[decalIndex] = { normal.x, normal.y, normal.z, std::clamp(normalThreshold, 0.0f, 1.0f) };
+
+	if (spTexture)
+	{
+		m_spDecalTex = spTexture;
+	}
+	else if (!m_spDecalTex)
+	{
+		m_spDecalTex = KdDirect3D::Instance().GetWhiteTex();
+	}
+
+	decalInfo.DecalNum++;
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -653,6 +693,8 @@ bool KdStandardShader::Init()
 	m_cb2_Material.Create();
 	m_cb3_Bone.Create();
 	m_cb4_Instancing.Create();
+	m_cb5_Decal.Create();
+	ClearDecals();
 
 	std::shared_ptr<KdTexture> ds = std::make_shared<KdTexture>();
 	ds->CreateDepthStencil(1024, 1024);
@@ -693,6 +735,7 @@ void KdStandardShader::Release()
 	// スキンメッシュ対応
 	m_cb3_Bone.Release();
 	m_cb4_Instancing.Release();
+	m_cb5_Decal.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////

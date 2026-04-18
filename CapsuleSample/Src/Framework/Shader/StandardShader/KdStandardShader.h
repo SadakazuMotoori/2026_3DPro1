@@ -10,6 +10,7 @@ public:
 	// スキンメッシュ対応
 	static const int maxBoneBufferSize = 300;
 	static const UINT maxInstanceDrawCount = 256;
+	static const int maxDecalNum = 16;
 
 	// 定数バッファ(オブジェクト単位更新)
 	struct cbObject
@@ -63,6 +64,17 @@ public:
 	// 定数バッファ(ボーン単位更新：スキンメッシュ対応)
 	struct cbBone {
 		Math::Matrix mBones[300];
+	};
+
+	// 定数バッファ(デカール単位更新)
+	struct cbDecal
+	{
+		int				DecalNum = 0;
+		float			_blank0[3] = { 0.0f, 0.0f, 0.0f };
+
+		Math::Matrix	WorldToDecal[maxDecalNum];
+		Math::Vector4	Color[maxDecalNum] = {};
+		Math::Vector4	NormalThreshold[maxDecalNum] = {};
 	};
 
 	//================================================
@@ -136,6 +148,13 @@ public:
 
 		SetDissolveTexture(*m_dissolveTex);
 	}
+
+	// 毎フレームの描画前にデカール登録を初期化する
+	void ClearDecals();
+
+	// Lit シェーダーへ投影デカールを登録する
+	void AddDecal(const Math::Matrix& decalMatrix, const std::shared_ptr<KdTexture>& spTexture,
+		const Math::Color& color = kWhiteColor, float normalThreshold = 0.6f);
 
 	//================================================
 	// 各定数バッファの取得
@@ -265,6 +284,9 @@ private:
 	KdConstantBuffer<cbMaterial>	m_cb2_Material;			// マテリアル毎に更新
 	KdConstantBuffer<cbBone>		m_cb3_Bone;				// ボーン事に更新(スキンメッシュ対応「)
 	KdConstantBuffer<cbInstancing>	m_cb4_Instancing;		// インスタンシング描画用
+	KdConstantBuffer<cbDecal>		m_cb5_Decal;			// デカール描画用
+
+	std::shared_ptr<KdTexture>		m_spDecalTex = nullptr;
 
 	KdRenderTargetPack	m_depthMapFromLightRTPack;
 	KdRenderTargetChanger m_depthMapFromLightRTChanger;
