@@ -283,6 +283,7 @@
     <ClInclude Include="Src\Application\GameObject\Character\Player\PlayerBase.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Player\SkinmeshMan\SkinmeshMan.h" />
     <ClInclude Include="Src\Application\GameObject\Map\MapBase.h" />
+    <ClInclude Include="Src\Application\GameObject\Map\Stage01\Environment\LensFlare\LensFlare.h" />
     <ClInclude Include="Src\Application\GameObject\Map\Stage01\Stage01.h" />
     <ClInclude Include="Src\Application\main.h" />
     <ClInclude Include="Src\Application\Scene\BaseScene\BaseScene.h" />
@@ -347,6 +348,7 @@
     <ClCompile Include="Src\Application\GameObject\Character\Player\PlayerBase.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Player\SkinmeshMan\SkinmeshMan.cpp" />
     <ClCompile Include="Src\Application\GameObject\Map\MapBase.cpp" />
+    <ClCompile Include="Src\Application\GameObject\Map\Stage01\Environment\LensFlare\LensFlare.cpp" />
     <ClCompile Include="Src\Application\GameObject\Map\Stage01\Stage01.cpp" />
     <ClCompile Include="Src\Application\main.cpp" />
     <ClCompile Include="Src\Application\Scene\BaseScene\BaseScene.cpp" />

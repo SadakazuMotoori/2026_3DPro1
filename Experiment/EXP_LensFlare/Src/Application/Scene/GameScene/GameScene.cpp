@@ -5,6 +5,8 @@
 #include "../../GameObject/Camera/TPSCamera/TPSCamera.h"
 
 #include "../../GameObject/Map/Stage01/Stage01.h"
+#include "../../GameObject/Map/Stage01/Environment/LensFlare/LensFlare.h"
+
 #include "../../GameObject/Character/Player/SkinMeshMan/SkinMeshMan.h"
 #include "../../GameObject/Character/Enemy/Enemy01/Enemy01.h"
 
@@ -28,6 +30,10 @@ void GameScene::Init()
 	_stage->Init();
 	AddObject(_stage);
 
+	std::shared_ptr<LensFlare> _lensFlare = std::make_shared<LensFlare>();
+	_lensFlare->Init();
+	AddObject(_lensFlare);
+
 	//===================================================================
 	// キャラクター初期化
 	//===================================================================
@@ -50,6 +56,8 @@ void GameScene::Init()
 	_camera->SetTarget(_skinmeshMan);
 	_camera->RegistHitObject(_stage);
 
+	// レンズフレアにカメラ情報をセット
+	_lensFlare->SetCamera(_camera);
 	// キャラクターにカメラ情報をセット
 	_skinmeshMan->SetCamera(_camera);
 	AddObject(_camera);

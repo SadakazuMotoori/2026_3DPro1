@@ -112,6 +112,12 @@
     <Filter Include="Src\Application\GameObject\Camera\CCTVCamera">
       <UniqueIdentifier>{fa44ec34-d6e1-4c24-aeee-7e47c1e39951}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Src\Application\GameObject\Map\Stage01\Environment">
+      <UniqueIdentifier>{b1b55dbb-efa8-45bf-8bad-35c8147ac2f2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Src\Application\GameObject\Map\Stage01\Environment\LensFlare">
+      <UniqueIdentifier>{40667b38-e82c-46b6-bad5-fa9d1a9b3acb}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Pch.h">
@@ -321,6 +327,9 @@
     <ClInclude Include="Src\Application\GameObject\Camera\CCTVCamera\CCTVCamera.h">
       <Filter>Src\Application\GameObject\Camera\CCTVCamera</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Application\GameObject\Map\Stage01\Environment\LensFlare\LensFlare.h">
+      <Filter>Src\Application\GameObject\Map\Stage01\Environment\LensFlare</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="src\Pch.cpp">
@@ -499,6 +508,9 @@
     </ClCompile>
     <ClCompile Include="Src\Application\GameObject\Camera\CCTVCamera\CCTVCamera.cpp">
       <Filter>Src\Application\GameObject\Camera\CCTVCamera</Filter>
+    </ClCompile>
+    <ClCompile Include="Src\Application\GameObject\Map\Stage01\Environment\LensFlare\LensFlare.cpp">
+      <Filter>Src\Application\GameObject\Map\Stage01\Environment\LensFlare</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
