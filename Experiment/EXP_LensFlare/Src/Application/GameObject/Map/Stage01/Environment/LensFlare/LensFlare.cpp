@@ -9,6 +9,9 @@ namespace
 	constexpr float kSunDistance = 400.0f;
 	// 明るさを急変させず、自然に追従させる補間係数。
 	constexpr float kFadeSpeed = 0.18f;
+	// フレア素材シートの分割数。
+	constexpr int kSheetColumns = 3;
+	constexpr int kSheetRows = 2;
 }
 
 // フレア描画に必要なテクスチャを一度だけ読み込む。
@@ -68,19 +71,6 @@ void LensFlare::PostUpdate()
 	m_intensity += (targetIntensity - m_intensity) * kFadeSpeed;
 }
 
-// ブライトパスでは中心の強い発光だけを加算合成する。
-void LensFlare::DrawBright()
-{
-	if (!m_spTexture) { return; }
-	if (m_intensity <= 0.01f) { return; }
-
-	KdShaderManager::Instance().m_spriteShader.Begin(true);
-	KdShaderManager::Instance().ChangeBlendState(KdBlendState::Add);
-	DrawFlare(true);
-	KdShaderManager::Instance().UndoBlendState();
-	KdShaderManager::Instance().m_spriteShader.End();
-}
-
 // 通常パスではフレア本体に加えてゴーストも描画する。
 void LensFlare::DrawSprite()
 {
@@ -88,7 +78,7 @@ void LensFlare::DrawSprite()
 	if (m_intensity <= 0.01f) { return; }
 
 	KdShaderManager::Instance().ChangeBlendState(KdBlendState::Add);
-	DrawFlare(false);
+	DrawFlare();
 	KdShaderManager::Instance().UndoBlendState();
 }
 
@@ -139,47 +129,52 @@ float LensFlare::CalcOcclusionRate(const Math::Vector3& camPos, const Math::Vect
 }
 
 // ディスク・リング・ストリーク・ゴーストを並べて、レンズフレアらしい見た目を作る。
-void LensFlare::DrawFlare(bool brightPass)
+void LensFlare::DrawFlare()
 {
-	// テクスチャは 2x2 に分割されており、それぞれ別のフレア素材になっている。
-	const Math::Rectangle discRect = GetSrcRect(0, 0);
+	// テクスチャは 3x2 に分割されており、それぞれ別のフレア素材になっている。
 	const Math::Rectangle ringRect = GetSrcRect(1, 0);
-	const Math::Rectangle streakRect = GetSrcRect(0, 1);
+	const Math::Rectangle discRect = GetSrcRect(2, 0);
 	const Math::Rectangle ghostRect = GetSrcRect(1, 1);
+	const Math::Rectangle hexRect = GetSrcRect(2, 1);
 
 	const Math::Vector2 sunPos = { m_sunScreenPos.x, m_sunScreenPos.y };
 	const Math::Vector2 toCenter = -sunPos;
-	const float scale = 0.9f + m_intensity * 0.35f;
+	const float sourceScale = 0.9f + m_intensity * 0.4f;
+	const float ghostScale = 0.9f + m_intensity * 0.3f;
 
 	auto& spriteShader = KdShaderManager::Instance().m_spriteShader;
 
-	const Math::Color discColor = { 1.0f, 0.95f, 0.82f, m_intensity * (brightPass ? 1.0f : 0.55f) };
-	const Math::Color ringColor = { 0.80f, 0.90f, 1.0f, m_intensity * (brightPass ? 0.70f : 0.28f) };
-	const Math::Color streakColor = { 1.0f, 0.90f, 0.75f, m_intensity * (brightPass ? 0.85f : 0.35f) };
+	const Math::Color ringColor = { 1.0f, 0.42f, 0.28f, m_intensity * 0.24f };
+	const Math::Color outerRingColor = { 0.82f, 0.36f, 0.30f, m_intensity * 0.10f };
 
-	// 光源位置には中心の発光、リング、横方向の筋を重ねる。
-	spriteShader.DrawTex(m_spTexture.get(), (int)sunPos.x, (int)sunPos.y, (int)(220.0f * scale), (int)(220.0f * scale), &discRect, &discColor);
-	spriteShader.DrawTex(m_spTexture.get(), (int)sunPos.x, (int)sunPos.y, (int)(280.0f * scale), (int)(280.0f * scale), &ringRect, &ringColor);
-	spriteShader.DrawTex(m_spTexture.get(), (int)sunPos.x, (int)sunPos.y, (int)(520.0f * scale), (int)(110.0f * scale), &streakRect, &streakColor);
+	// 通常パスでは、大きい暖色リングと複数のゴーストを画面中心方向へ並べる。
+	spriteShader.DrawTex(m_spTexture.get(), (int)sunPos.x, (int)sunPos.y, (int)(600.0f * sourceScale), (int)(600.0f * sourceScale), &ringRect, &ringColor);
+	spriteShader.DrawTex(m_spTexture.get(), (int)sunPos.x, (int)sunPos.y, (int)(860.0f * sourceScale), (int)(860.0f * sourceScale), &ringRect, &outerRingColor);
 
-	if (brightPass) { return; }
-
-	// 通常パスでは、画面中心へ向かうライン上にゴーストを並べる。
-	const std::array<float, 4> factors = { 0.35f, 0.75f, 1.15f, 1.55f };
-	const std::array<float, 4> sizes = { 90.0f, 60.0f, 120.0f, 70.0f };
-	const std::array<Math::Color, 4> ghostColors =
+	const std::array<float, 5> factors = { 0.30f, 0.52f, 0.88f, 1.22f, 1.58f };
+	const std::array<float, 5> sizes = { 96.0f, 28.0f, 92.0f, 150.0f, 238.0f };
+	const std::array<Math::Rectangle, 5> ghostRects =
 	{
-		Math::Color(0.85f, 0.95f, 1.0f, m_intensity * 0.24f),
-		Math::Color(1.0f, 0.82f, 0.72f, m_intensity * 0.20f),
-		Math::Color(0.70f, 0.85f, 1.0f, m_intensity * 0.22f),
-		Math::Color(1.0f, 0.95f, 0.80f, m_intensity * 0.16f)
+		discRect,
+		discRect,
+		hexRect,
+		ghostRect,
+		ghostRect
+	};
+	const std::array<Math::Color, 5> ghostColors =
+	{
+		Math::Color(0.84f, 0.90f, 1.0f, m_intensity * 0.18f),
+		Math::Color(0.62f, 1.0f, 0.78f, m_intensity * 0.28f),
+		Math::Color(1.0f, 0.66f, 0.38f, m_intensity * 0.17f),
+		Math::Color(0.92f, 0.46f, 0.74f, m_intensity * 0.18f),
+		Math::Color(0.34f, 0.30f, 1.0f, m_intensity * 0.26f)
 	};
 
 	for (size_t i = 0; i < factors.size(); ++i)
 	{
 		const Math::Vector2 ghostPos = sunPos + toCenter * factors[i];
-		const int drawSize = (int)(sizes[i] * scale);
-		spriteShader.DrawTex(m_spTexture.get(), (int)ghostPos.x, (int)ghostPos.y, drawSize, drawSize, &ghostRect, &ghostColors[i]);
+		const int drawSize = (int)(sizes[i] * ghostScale);
+		spriteShader.DrawTex(m_spTexture.get(), (int)ghostPos.x, (int)ghostPos.y, drawSize, drawSize, &ghostRects[i], &ghostColors[i]);
 	}
 }
 
@@ -190,8 +185,8 @@ Math::Rectangle LensFlare::GetSrcRect(int xIndex, int yIndex) const
 
 	if (!m_spTexture) { return rect; }
 
-	const int cellW = (int)m_spTexture->GetWidth() / 2;
-	const int cellH = (int)m_spTexture->GetHeight() / 2;
+	const int cellW = (int)m_spTexture->GetWidth() / kSheetColumns;
+	const int cellH = (int)m_spTexture->GetHeight() / kSheetRows;
 
 	rect.x = cellW * xIndex;
 	rect.y = cellH * yIndex;

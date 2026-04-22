@@ -14,7 +14,7 @@ struct KdRenderTargetPack
 
 	void SetViewPort(D3D11_VIEWPORT* pVP);
 
-	void ClearTexture(const Math::Color& fillColor = kBlueColor);
+	void ClearTexture(const Math::Color& fillColor = kBlackColor);
 
 	std::shared_ptr<KdTexture> m_RTTexture = nullptr;
 	std::shared_ptr<KdTexture> m_ZBuffer = nullptr;
