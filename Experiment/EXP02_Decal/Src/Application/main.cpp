@@ -83,6 +83,7 @@ void Application::PostUpdate()
 void Application::KdBeginDraw(bool usePostProcess)
 {
 	KdDirect3D::Instance().ClearBackBuffer();
+	KdShaderManager::Instance().m_StandardShader.ClearDecals();
 
 	KdShaderManager::Instance().WorkAmbientController().Draw();
 

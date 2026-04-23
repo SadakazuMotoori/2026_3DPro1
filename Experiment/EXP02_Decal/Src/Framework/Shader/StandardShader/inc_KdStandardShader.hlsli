@@ -34,6 +34,17 @@ cbuffer cbBones : register(b3)
 	row_major float4x4 g_mBones[300];
 };
 
+// デカール
+cbuffer cbDecal : register(b4)
+{
+	int		g_DecalNum;
+	float3	g_DecalBlank;
+
+	row_major float4x4 g_mDecalWorldToLocal[16];
+	float4 g_DecalColor[16];
+	float4 g_DecalNormalThreshold[16];
+};
+
 // 頂点シェーダから出力するデータ
 struct VSOutput
 {

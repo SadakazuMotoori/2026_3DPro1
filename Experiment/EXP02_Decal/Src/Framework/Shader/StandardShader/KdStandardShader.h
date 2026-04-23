@@ -8,7 +8,8 @@ class KdStandardShader
 {
 public:
 	// スキンメッシュ対応
-	static const int maxBoneBufferSize = 300;
+	static const int maxBoneBufferSize	= 300;
+	static const int maxDecalNum		= 16;
 
 	// 定数バッファ(オブジェクト単位更新)
 	struct cbObject
@@ -54,6 +55,17 @@ public:
 	// 定数バッファ(ボーン単位更新：スキンメッシュ対応)
 	struct cbBone {
 		Math::Matrix mBones[300];
+	};
+
+	// 定数バッファ(デカール単位更新)
+	struct cbDecal
+	{
+		int				DecalNum = 0;
+		float			_blank0[3] = { 0.0f, 0.0f, 0.0f };
+
+		Math::Matrix	WorldToDecal[maxDecalNum];
+		Math::Vector4	Color[maxDecalNum] = {};
+		Math::Vector4	NormalThreshold[maxDecalNum] = {};
 	};
 
 	//================================================
@@ -127,6 +139,13 @@ public:
 
 		SetDissolveTexture(*m_dissolveTex);
 	}
+
+	// 毎フレームの描画前にデカール登録を初期化する
+	void ClearDecals();
+
+	// Lit シェーダーへ投影デカールを登録する
+	void AddDecal(const Math::Matrix& decalMatrix, const std::shared_ptr<KdTexture>& spTexture,
+		const Math::Color& color = kWhiteColor, float normalThreshold = 0.6f);
 
 	//================================================
 	// 各定数バッファの取得
@@ -237,16 +256,18 @@ private:
 	// ピクセルシェーダー
 	ID3D11PixelShader* m_PS_Lit = nullptr;					// 陰影あり
 	ID3D11PixelShader* m_PS_UnLit = nullptr;				// 陰影なし
-	ID3D11PixelShader* m_PS_GenDepthFromLight = nullptr;	// 光からの深度
+	ID3D11PixelShader* m_PS_GenDepthFromLight	= nullptr;	// 光からの深度
 
 	// テクスチャ
-	std::shared_ptr<KdTexture>	m_dissolveTex = nullptr;	// ディゾルブで使用するデフォルトテクスチャ
+	std::shared_ptr<KdTexture>	m_dissolveTex	= nullptr;	// ディゾルブで使用するデフォルトテクスチャ
+	std::shared_ptr<KdTexture>	m_spDecalTex	= nullptr;	// デカールで利用するテクスチャ
 
 	// 定数バッファ
 	KdConstantBuffer<cbObject>		m_cb0_Obj;				// オブジェクト単位で更新
 	KdConstantBuffer<cbMesh>		m_cb1_Mesh;				// メッシュ毎に更新
 	KdConstantBuffer<cbMaterial>	m_cb2_Material;			// マテリアル毎に更新
 	KdConstantBuffer<cbBone>		m_cb3_Bone;				// ボーン事に更新(スキンメッシュ対応「)
+	KdConstantBuffer<cbDecal>		m_cb4_Decal;			// デカール描画用
 
 	KdRenderTargetPack	m_depthMapFromLightRTPack;
 	KdRenderTargetChanger m_depthMapFromLightRTChanger;

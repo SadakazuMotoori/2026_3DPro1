@@ -11,6 +11,7 @@ Texture2D g_normalTex : register(t3);		// 法線マップ
 Texture2D g_dirShadowMap : register(t10);	// 平行光シャドウマップ
 Texture2D g_dissolveTex : register(t11);	// ディゾルブマップ
 Texture2D g_environmentTex : register(t12); // 反射景マップ
+Texture2D g_decalTex : register(t13);		// デカールテクスチャ
 
 // サンプラ
 SamplerState g_ss : register(s0);				// 通常のテクスチャ描画用
@@ -24,6 +25,42 @@ float BlinnPhong(float3 lightDir, float3 vCam, float3 normal, float specPower)
 
 	// 正規化Blinn-Phong
 	return spec * ((specPower + 2) / (2 * 3.1415926535));
+}
+
+float4 ApplyDecalBaseColor(float4 baseColor, float3 worldPos, float3 surfaceNormal)
+{
+	for (int decalIdx = 0; decalIdx < g_DecalNum; ++decalIdx)
+	{
+		float3 decalNormal = normalize(g_DecalNormalThreshold[decalIdx].xyz);
+		if (dot(surfaceNormal, decalNormal) < g_DecalNormalThreshold[decalIdx].w)
+		{
+			continue;
+		}
+
+		float4 localPos = mul(float4(worldPos, 1.0f), g_mDecalWorldToLocal[decalIdx]);
+		if (abs(localPos.x) > 0.5f || abs(localPos.y) > 0.5f || abs(localPos.z) > 0.5f)
+		{
+			continue;
+		}
+
+		float2 decalUV = float2(localPos.x + 0.5f, 1.0f - (localPos.z + 0.5f));
+		float4 decalSample = g_decalTex.SampleLevel(g_ss, decalUV, 0);
+
+		float radialMask = saturate(1.0f - length(localPos.xz * 2.0f));
+		radialMask *= radialMask;
+
+		float thicknessMask = saturate((0.5f - abs(localPos.y)) / 0.15f);
+		float decalAlpha = decalSample.a * g_DecalColor[decalIdx].a * radialMask * thicknessMask;
+		if (decalAlpha <= 0.001f)
+		{
+			continue;
+		}
+
+		float3 decalColor = decalSample.rgb * g_DecalColor[decalIdx].rgb;
+		baseColor.rgb = lerp(baseColor.rgb, decalColor, decalAlpha);
+	}
+
+	return baseColor;
 }
 
 //================================
@@ -41,7 +78,11 @@ float4 main(VSOutput In) : SV_Target0
 	//------------------------------------------
 	// 材質色
 	//------------------------------------------
-	float4 baseColor = g_baseTex.Sample(g_ss, In.UV) * g_BaseColor * In.Color;
+	float4 baseColor		= g_baseTex.Sample(g_ss, In.UV) * g_BaseColor * In.Color;
+
+	// 材質色編集(デカールによる影響もここで処理しておく)
+	float3 surfaceNormal	= normalize(In.wN);
+	baseColor				= ApplyDecalBaseColor(baseColor, In.wPos, surfaceNormal);
 	
 	// Alphaテスト
 	if( baseColor.a < 0.05f )

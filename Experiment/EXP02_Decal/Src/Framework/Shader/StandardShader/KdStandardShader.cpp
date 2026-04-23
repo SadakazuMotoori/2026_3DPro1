@@ -29,6 +29,7 @@ void KdStandardShader::BeginLit()
 	{
 		KdShaderManager::Instance().SetPSConstantBuffer(0, m_cb0_Obj.GetAddress());
 		KdShaderManager::Instance().SetPSConstantBuffer(2, m_cb2_Material.GetAddress());
+		KdShaderManager::Instance().SetPSConstantBuffer(4, m_cb4_Decal.GetAddress());
 	}
 
 	// ボーン情報をセット(スキンメッシュ対応)
@@ -42,6 +43,11 @@ void KdStandardShader::BeginLit()
 
 	// 影ぼかし用の比較機能付きサンプラーのセット
 	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Linear_Clamp_Cmp, 1);
+
+	// 今はここで呼ぶ
+	ID3D11ShaderResourceView* decalSRV = m_spDecalTex ? m_spDecalTex->WorkSRView() : KdDirect3D::Instance().GetWhiteTex()->WorkSRView();
+	KdDirect3D::Instance().WorkDevContext()->PSSetShaderResources(13, 1, &decalSRV);
+	m_cb4_Decal.Write();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -503,6 +509,8 @@ bool KdStandardShader::Init()
 	m_cb1_Mesh.Create();
 	m_cb2_Material.Create();
 	m_cb3_Bone.Create();
+	m_cb4_Decal.Create();
+	ClearDecals();
 
 	std::shared_ptr<KdTexture> ds = std::make_shared<KdTexture>();
 	ds->CreateDepthStencil(1024, 1024);
@@ -542,6 +550,7 @@ void KdStandardShader::Release()
 	m_cb2_Material.Release();
 	// スキンメッシュ対応
 	m_cb3_Bone.Release();
+	m_cb4_Decal.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -607,4 +616,40 @@ void KdStandardShader::ResetCBObject()
 	m_cb0_Obj.Write();
 
 	m_dirtyCBObj = false;
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// デカールオブジェクト
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+void KdStandardShader::ClearDecals()
+{
+	m_cb4_Decal.Work() = cbDecal();
+	m_spDecalTex = nullptr;
+}
+
+void KdStandardShader::AddDecal(const Math::Matrix& decalMatrix, const std::shared_ptr<KdTexture>& spTexture,
+	const Math::Color& color, float normalThreshold)
+{
+	auto& decalInfo = m_cb4_Decal.Work();
+	if (decalInfo.DecalNum >= maxDecalNum) { return; }
+
+	const int decalIndex = decalInfo.DecalNum;
+	Math::Vector3 normal = Math::Vector3::TransformNormal(Math::Vector3::Up, decalMatrix);
+	if (normal.LengthSquared() <= 0.0f) { return; }
+	normal.Normalize();
+
+	decalInfo.WorldToDecal[decalIndex] = decalMatrix.Invert();
+	decalInfo.Color[decalIndex] = color;
+	decalInfo.NormalThreshold[decalIndex] = { normal.x, normal.y, normal.z, std::clamp(normalThreshold, 0.0f, 1.0f) };
+
+	if (spTexture)
+	{
+		m_spDecalTex = spTexture;
+	}
+	else if (!m_spDecalTex)
+	{
+		m_spDecalTex = KdDirect3D::Instance().GetWhiteTex();
+	}
+
+	decalInfo.DecalNum++;
 }

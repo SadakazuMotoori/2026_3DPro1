@@ -4,7 +4,7 @@ void Decal::Init()
 {
 	if (!m_spTexture)
 	{
-		m_spTexture = std::make_shared<KdTexture>("Asset/Textures/Decal/decal_tactical_mark_01.png");;
+		m_spTexture = std::make_shared<KdTexture>("Asset/Textures/Decal/decal_tactical_mark_01.png");
 	}
 
 	UpdateMatrix();
@@ -12,6 +12,9 @@ void Decal::Init()
 
 void Decal::Update()
 {
+	if (m_wpTarget.expired()) return;
+
+	SetPos(m_position = m_wpTarget.lock()->GetPos());
 }
 
 void Decal::PreDraw()
@@ -19,9 +22,7 @@ void Decal::PreDraw()
 	if (!m_spTexture) { return; }
 
 	if (m_wpTarget.expired()) return;
-
-	m_position = m_wpTarget.lock()->GetPos();
-	m_mWorld = Math::Matrix::CreateScale(m_scale) * Math::Matrix::CreateTranslation(m_position);
+	SetPos(m_position = m_wpTarget.lock()->GetPos());
 	KdShaderManager::Instance().m_StandardShader.AddDecal(m_mWorld, m_spTexture, m_color, m_normalThreshold);
 }
 
