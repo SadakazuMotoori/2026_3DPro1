@@ -260,7 +260,8 @@ private:
 
 	// テクスチャ
 	std::shared_ptr<KdTexture>	m_dissolveTex	= nullptr;	// ディゾルブで使用するデフォルトテクスチャ
-	std::shared_ptr<KdTexture>	m_spDecalTex	= nullptr;	// デカールで利用するテクスチャ
+	std::shared_ptr<KdTexture>	m_spDecalTex[maxDecalNum] = {};	// デカール毎に利用する元テクスチャ
+	KdTexture					m_decalTexArray;				// デカール描画時に利用する Texture2DArray
 
 	// 定数バッファ
 	KdConstantBuffer<cbObject>		m_cb0_Obj;				// オブジェクト単位で更新

@@ -2,6 +2,132 @@
 
 #include "KdStandardShader.h"
 
+namespace
+{
+bool GetTexture2DFromSRV(ID3D11ShaderResourceView* srv, ID3D11Texture2D** ppTex, D3D11_TEXTURE2D_DESC* pDesc = nullptr)
+{
+	if (!srv || !ppTex) { return false; }
+
+	*ppTex = nullptr;
+
+	ID3D11Resource* resource = nullptr;
+	srv->GetResource(&resource);
+	if (!resource) { return false; }
+
+	HRESULT hr = resource->QueryInterface<ID3D11Texture2D>(ppTex);
+	resource->Release();
+	if (FAILED(hr) || !(*ppTex)) { return false; }
+
+	if (pDesc)
+	{
+		(*ppTex)->GetDesc(pDesc);
+	}
+
+	return true;
+}
+
+bool CreateDecalTextureArray(KdTexture& dstTex, const D3D11_TEXTURE2D_DESC& srcDesc, int arraySize)
+{
+	if (arraySize <= 0) { return false; }
+
+	// デカールのシェーダーは SampleLevel(..., 0) で mip0 のみを参照するため、
+	// 配列テクスチャも 1 mip 構成で十分。
+	size_t rowPitch = 0;
+	size_t slicePitch = 0;
+	if (FAILED(DirectX::ComputePitch(srcDesc.Format, srcDesc.Width, srcDesc.Height, rowPitch, slicePitch)))
+	{
+		return false;
+	}
+
+	// 先に全スライスを透明で初期化しておくことで、
+	// コピー対象外のスライスは「何も貼られないデカール」として安全に扱える。
+	std::vector<unsigned char> clearPixels(slicePitch * static_cast<size_t>(arraySize), 0);
+	std::vector<D3D11_SUBRESOURCE_DATA> initData(static_cast<size_t>(arraySize));
+	for (int i = 0; i < arraySize; ++i)
+	{
+		initData[i].pSysMem = clearPixels.data() + slicePitch * static_cast<size_t>(i);
+		initData[i].SysMemPitch = static_cast<UINT>(rowPitch);
+		initData[i].SysMemSlicePitch = static_cast<UINT>(slicePitch);
+	}
+
+	return dstTex.Create(static_cast<int>(srcDesc.Width), static_cast<int>(srcDesc.Height), srcDesc.Format,
+		static_cast<UINT>(arraySize), initData.data());
+}
+
+bool RefreshDecalTextureArray(KdTexture& dstTex, const std::shared_ptr<KdTexture>(&srcTex)[KdStandardShader::maxDecalNum], int decalNum)
+{
+	dstTex.Release();
+	if (decalNum <= 0) { return false; }
+
+	// Texture2DArray は全スライスでサイズ・フォーマットを揃える必要があるため、
+	// 最初に見つかった有効テクスチャを「配列全体の基準情報」として採用する。
+	D3D11_TEXTURE2D_DESC baseDesc = {};
+	ID3D11Texture2D* baseTex = nullptr;
+	for (int i = 0; i < decalNum; ++i)
+	{
+		if (!srcTex[i]) { continue; }
+
+		if (GetTexture2DFromSRV(srcTex[i]->WorkSRView(), &baseTex, &baseDesc))
+		{
+			break;
+		}
+	}
+	if (!baseTex) { return false; }
+	baseTex->Release();
+
+	if (!CreateDecalTextureArray(dstTex, baseDesc, decalNum))
+	{
+		return false;
+	}
+
+	// ここから各デカールの元テクスチャを、対応する配列スライスへ 1 枚ずつコピーする。
+	ID3D11Texture2D* dstArrayTex = nullptr;
+	if (!GetTexture2DFromSRV(dstTex.WorkSRView(), &dstArrayTex))
+	{
+		dstTex.Release();
+		return false;
+	}
+
+	for (int i = 0; i < decalNum; ++i)
+	{
+		if (!srcTex[i]) { continue; }
+
+		D3D11_TEXTURE2D_DESC srcDesc = {};
+		ID3D11Texture2D* srcArrayTex = nullptr;
+		if (!GetTexture2DFromSRV(srcTex[i]->WorkSRView(), &srcArrayTex, &srcDesc))
+		{
+			continue;
+		}
+
+		// Texture2DArray は全スライスでサイズ・フォーマットを揃える必要があるため、
+		// 条件が合わないテクスチャはコピーせず、初期化済みの透明スライスのまま残す。
+		const bool canCopy =
+			srcDesc.ArraySize == 1 &&
+			srcDesc.Width == baseDesc.Width &&
+			srcDesc.Height == baseDesc.Height &&
+			srcDesc.Format == baseDesc.Format;
+
+		if (canCopy)
+		{
+			// 配列テクスチャ側は mip0 しか持たないので、元テクスチャ側も subresource 0 だけをコピーする。
+			KdDirect3D::Instance().WorkDevContext()->CopySubresourceRegion(
+				dstArrayTex,
+				D3D11CalcSubresource(0, static_cast<UINT>(i), 1),
+				0, 0, 0,
+				srcArrayTex,
+				0,
+				nullptr);
+		}
+
+		srcArrayTex->Release();
+	}
+
+	dstArrayTex->Release();
+
+	return true;
+}
+}
+
 
 //================================================
 // 描画準備
@@ -44,8 +170,10 @@ void KdStandardShader::BeginLit()
 	// 影ぼかし用の比較機能付きサンプラーのセット
 	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Linear_Clamp_Cmp, 1);
 
-	// 今はここで呼ぶ
-	ID3D11ShaderResourceView* decalSRV = m_spDecalTex ? m_spDecalTex->WorkSRView() : KdDirect3D::Instance().GetWhiteTex()->WorkSRView();
+	// デカール用テクスチャは Texture2DArray に詰め直してから 1 本の SRV として渡す。
+	// シェーダー側は decalIndex をそのまま配列スライス番号として扱う。
+	RefreshDecalTextureArray(m_decalTexArray, m_spDecalTex, m_cb4_Decal.Work().DecalNum);
+	ID3D11ShaderResourceView* decalSRV = m_decalTexArray.WorkSRView();
 	KdDirect3D::Instance().WorkDevContext()->PSSetShaderResources(13, 1, &decalSRV);
 	m_cb4_Decal.Write();
 }
@@ -624,8 +752,13 @@ void KdStandardShader::ResetCBObject()
 void KdStandardShader::ClearDecals()
 {
 	// デカールは毎フレーム PreDraw から再登録されるため、描画開始時に前フレーム分を空に戻す。
+	// 行列・色・法線条件だけでなく、Texture2DArray を組み立てる元テクスチャ情報もここで初期化する。
 	m_cb4_Decal.Work() = cbDecal();
-	m_spDecalTex = nullptr;
+	for (auto& spDecalTex : m_spDecalTex)
+	{
+		spDecalTex = nullptr;
+	}
+	m_decalTexArray.Release();
 }
 
 void KdStandardShader::AddDecal(const Math::Matrix& decalMatrix, const std::shared_ptr<KdTexture>& spTexture,
@@ -649,16 +782,10 @@ void KdStandardShader::AddDecal(const Math::Matrix& decalMatrix, const std::shar
 	// w が 1 に近いほど、デカール正面に近い面だけに限定される。
 	decalInfo.NormalThreshold[decalIndex] = { normal.x, normal.y, normal.z, std::clamp(normalThreshold, 0.0f, 1.0f) };
 
-	if (spTexture)
-	{
-		// 現実装では、同一フレーム中に参照するデカールテクスチャを 1 枚だけ PS に渡している。
-		m_spDecalTex = spTexture;
-	}
-	else if (!m_spDecalTex)
-	{
-		// テクスチャ未指定時でもサンプリングできるよう、白テクスチャを保険として使う。
-		m_spDecalTex = KdDirect3D::Instance().GetWhiteTex();
-	}
+	// 各デカールは自分用の元テクスチャを保持しておき、
+	// BeginLit 時に decalIndex 順で Texture2DArray の各スライスへ詰め直す。
+	// テクスチャ未指定時でも必ず配列化できるよう、白テクスチャを保険として保持しておく。
+	m_spDecalTex[decalIndex] = spTexture ? spTexture : KdDirect3D::Instance().GetWhiteTex();
 
 	decalInfo.DecalNum++;
 }

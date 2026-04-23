@@ -11,7 +11,7 @@ Texture2D g_normalTex : register(t3);		// 法線マップ
 Texture2D g_dirShadowMap : register(t10);	// 平行光シャドウマップ
 Texture2D g_dissolveTex : register(t11);	// ディゾルブマップ
 Texture2D g_environmentTex : register(t12); // 反射景マップ
-Texture2D g_decalTex : register(t13);		// デカールテクスチャ
+Texture2DArray g_decalTex : register(t13);	// デカール用 Texture2DArray
 
 // サンプラ
 SamplerState g_ss : register(s0);				// 通常のテクスチャ描画用
@@ -50,7 +50,9 @@ float4 ApplyDecalBaseColor(float4 baseColor, float3 worldPos, float3 surfaceNorm
 
 		// XZ をデカール画像の平面座標として使う。Y は「投影の厚み」判定に残しておく。
 		float2 decalUV = float2(localPos.x + 0.5f, 1.0f - (localPos.z + 0.5f));
-		float4 decalSample = g_decalTex.SampleLevel(g_ss, decalUV, 0);
+		// CPU 側で decalIndex 順に Texture2DArray へ詰めてあるため、
+		// その番号をそのまま配列スライス番号として使って参照できる。
+		float4 decalSample = g_decalTex.SampleLevel(g_ss, float3(decalUV, (float)decalIdx), 0);
 
 		// 中心ほど濃く、外周ほど薄くする円形マスク。
 		// localPos.xz は ±0.5 範囲なので 2 倍して半径 1 の基準へ合わせ、
