@@ -83,6 +83,7 @@ void Application::PostUpdate()
 void Application::KdBeginDraw(bool usePostProcess)
 {
 	KdDirect3D::Instance().ClearBackBuffer();
+	// デカールは各オブジェクトが PreDraw でそのフレーム分だけ登録し直すため、描画開始時に一度空にする。
 	KdShaderManager::Instance().m_StandardShader.ClearDecals();
 
 	KdShaderManager::Instance().WorkAmbientController().Draw();

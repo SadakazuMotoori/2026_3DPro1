@@ -32,24 +32,36 @@ float4 ApplyDecalBaseColor(float4 baseColor, float3 worldPos, float3 surfaceNorm
 	for (int decalIdx = 0; decalIdx < g_DecalNum; ++decalIdx)
 	{
 		float3 decalNormal = normalize(g_DecalNormalThreshold[decalIdx].xyz);
+		// デカールが向いている方向と、今描こうとしている面の法線方向を比較し、
+		// 一定以上向きが近い面にだけデカールを貼る。
 		if (dot(surfaceNormal, decalNormal) < g_DecalNormalThreshold[decalIdx].w)
 		{
 			continue;
 		}
 
+		// ピクセルのワールド座標をデカールのローカル空間へ戻す。
+		// ローカル空間では、中心が原点で各軸 ±0.5 の箱をデカール有効範囲として扱う。
 		float4 localPos = mul(float4(worldPos, 1.0f), g_mDecalWorldToLocal[decalIdx]);
 		if (abs(localPos.x) > 0.5f || abs(localPos.y) > 0.5f || abs(localPos.z) > 0.5f)
 		{
+			// 箱の外にあるピクセルは、このデカールの影響を受けない。
 			continue;
 		}
 
+		// XZ をデカール画像の平面座標として使う。Y は「投影の厚み」判定に残しておく。
 		float2 decalUV = float2(localPos.x + 0.5f, 1.0f - (localPos.z + 0.5f));
 		float4 decalSample = g_decalTex.SampleLevel(g_ss, decalUV, 0);
 
+		// 中心ほど濃く、外周ほど薄くする円形マスク。
+		// localPos.xz は ±0.5 範囲なので 2 倍して半径 1 の基準へ合わせ、
+		// さらに 2 乗して輪郭を少しなめらかにしている。
 		float radialMask = saturate(1.0f - length(localPos.xz * 2.0f));
 		radialMask *= radialMask;
 
+		// Y 方向はデカールの厚み。中心付近は濃く、上下端に近づくほどフェードさせる。
 		float thicknessMask = saturate((0.5f - abs(localPos.y)) / 0.15f);
+		// テクスチャの α、設定色の α、平面方向の減衰、厚み方向の減衰を掛け合わせて
+		// 最終的にどれだけ元の色へ混ぜるかを決める。
 		float decalAlpha = decalSample.a * g_DecalColor[decalIdx].a * radialMask * thicknessMask;
 		if (decalAlpha <= 0.001f)
 		{
@@ -57,6 +69,7 @@ float4 ApplyDecalBaseColor(float4 baseColor, float3 worldPos, float3 surfaceNorm
 		}
 
 		float3 decalColor = decalSample.rgb * g_DecalColor[decalIdx].rgb;
+		// decalAlpha を重みとして、元のベースカラーとデカール色を線形補間する。
 		baseColor.rgb = lerp(baseColor.rgb, decalColor, decalAlpha);
 	}
 

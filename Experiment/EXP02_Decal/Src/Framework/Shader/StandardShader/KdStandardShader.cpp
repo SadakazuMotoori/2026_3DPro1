@@ -623,6 +623,7 @@ void KdStandardShader::ResetCBObject()
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 void KdStandardShader::ClearDecals()
 {
+	// デカールは毎フレーム PreDraw から再登録されるため、描画開始時に前フレーム分を空に戻す。
 	m_cb4_Decal.Work() = cbDecal();
 	m_spDecalTex = nullptr;
 }
@@ -634,20 +635,28 @@ void KdStandardShader::AddDecal(const Math::Matrix& decalMatrix, const std::shar
 	if (decalInfo.DecalNum >= maxDecalNum) { return; }
 
 	const int decalIndex = decalInfo.DecalNum;
+	// デカールのローカル上方向をワールド空間へ変換し、
+	// 「どの向きの面にだけ貼るか」を表す基準法線として使う。
 	Math::Vector3 normal = Math::Vector3::TransformNormal(Math::Vector3::Up, decalMatrix);
 	if (normal.LengthSquared() <= 0.0f) { return; }
 	normal.Normalize();
 
+	// シェーダー側では各ピクセルのワールド座標をデカールのローカル空間へ戻して、
+	// 範囲判定や UV 計算をするため、ここでは逆行列を保持しておく。
 	decalInfo.WorldToDecal[decalIndex] = decalMatrix.Invert();
 	decalInfo.Color[decalIndex] = color;
+	// xyz は貼り付け対象面の基準法線、w は surfaceNormal との内積しきい値。
+	// w が 1 に近いほど、デカール正面に近い面だけに限定される。
 	decalInfo.NormalThreshold[decalIndex] = { normal.x, normal.y, normal.z, std::clamp(normalThreshold, 0.0f, 1.0f) };
 
 	if (spTexture)
 	{
+		// 現実装では、同一フレーム中に参照するデカールテクスチャを 1 枚だけ PS に渡している。
 		m_spDecalTex = spTexture;
 	}
 	else if (!m_spDecalTex)
 	{
+		// テクスチャ未指定時でもサンプリングできるよう、白テクスチャを保険として使う。
 		m_spDecalTex = KdDirect3D::Instance().GetWhiteTex();
 	}
 
