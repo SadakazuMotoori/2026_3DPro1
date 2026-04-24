@@ -31,6 +31,13 @@ public:
 	void BeginBright();
 	void EndBright();
 
+	// 歪みオブジェクト描画の開始 / 終了
+	// ここで色を描くのではなく、最終合成用の歪みベクトルだけを RT へ蓄積する
+	// Draw() で作ったシーン画像にはまだ手を入れず、
+	// 別RTへ「どこをどれだけ曲げるか」だけを貯める役割
+	void BeginDistortion();
+	void EndDistortion();
+
 	void PostEffectProcess();
 
 	void GenerateBlurTexture(std::shared_ptr<KdTexture>& spSrcTex, std::shared_ptr<KdTexture>& spDstTex, D3D11_VIEWPORT& VP, int blurRadius);
@@ -40,6 +47,8 @@ private:
 	void BlurProcess();
 	void LightBloomProcess();
 	void DepthOfFieldProcess();
+	// 被写界深度まで終わった画像へ、歪みRTの内容を適用して最終画面を作る
+	void DistortionProcess();
 
 	void CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingSize, const Math::Vector2& dir);
 
@@ -51,6 +60,8 @@ private:
 	void SetBlurToDevice();
 	void SetDoFToDevice();
 	void SetBrightToDevice();
+	// 歪み合成用ピクセルシェーダーをデバイスへセットする
+	void SetDistortionToDevice();
 
 	ID3D11VertexShader* m_VS = nullptr;
 	ID3D11InputLayout* m_inputLayout = nullptr;
@@ -58,6 +69,7 @@ private:
 	ID3D11PixelShader* m_PS_Blur = nullptr;
 	ID3D11PixelShader* m_PS_DoF = nullptr;
 	ID3D11PixelShader* m_PS_Bright = nullptr;
+	ID3D11PixelShader* m_PS_Distortion = nullptr;
 
 	static const int kBlurSamplingRadius = 8;
 	static const int kLightBloomSamplingRadius = 4;
@@ -97,6 +109,8 @@ private:
 	KdRenderTargetPack	m_strongBlurRTPack;
 
 	KdRenderTargetPack	m_depthOfFieldRTPack;
+	// RG に UV オフセット量、A に歪み適用率を蓄積するRT
+	KdRenderTargetPack	m_distortionRTPack;
 
 	KdRenderTargetPack	m_brightEffectRTPack;
 	static const int	kLightBloomNum = 4;
@@ -104,6 +118,7 @@ private:
 
 	KdRenderTargetChanger m_postEffectRTChanger;
 	KdRenderTargetChanger m_brightRTChanger;
+	KdRenderTargetChanger m_distortionRTChanger;
 
 	Vertex m_screenVert[4];
 };

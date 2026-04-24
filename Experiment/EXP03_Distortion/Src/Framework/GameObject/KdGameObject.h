@@ -31,6 +31,10 @@ public:
 	virtual void DrawLit() {}
 	virtual void DrawUnLit() {}
 	virtual void DrawEffect() {}
+	// 背景歪み用の描画
+	// ここでは最終的な色を描かず、後段のポストエフェクトで使う
+	// 「どの方向へ何ピクセル分だけ背景を曲げるか」という情報だけを書き出す
+	virtual void DrawDistortion() {}
 	virtual void DrawBright() {}
 	virtual void DrawSprite() {}
 	virtual void DrawDebug();

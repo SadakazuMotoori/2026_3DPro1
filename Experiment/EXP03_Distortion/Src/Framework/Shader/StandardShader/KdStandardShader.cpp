@@ -86,6 +86,49 @@ void KdStandardShader::EndUnLit()
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// 歪み用オブジェクトの描画直前処理
+// ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+// 既存の UnLit 用頂点シェーダーを流用しつつ、
+// ピクセルシェーダーだけを歪みベクトル出力用へ切り替える
+// つまり「板ポリを描く座標計算」は今まで通り使い、
+// 「何色を出すか」だけを歪み専用ロジックへ差し替える
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+void KdStandardShader::BeginDistortion()
+{
+	if (KdShaderManager::Instance().SetVertexShader(m_VS_UnLit))
+	{
+		KdShaderManager::Instance().SetInputLayout(m_inputLayout);
+
+		KdShaderManager::Instance().SetVSConstantBuffer(0, m_cb0_Obj.GetAddress());
+		KdShaderManager::Instance().SetVSConstantBuffer(1, m_cb1_Mesh.GetAddress());
+	}
+
+	if (KdShaderManager::Instance().SetPixelShader(m_PS_Distortion))
+	{
+		KdShaderManager::Instance().SetPSConstantBuffer(0, m_cb0_Obj.GetAddress());
+		KdShaderManager::Instance().SetPSConstantBuffer(2, m_cb2_Material.GetAddress());
+		// b4 には歪み専用パラメータを束ねた定数バッファを割り当てる
+		// 既存の描画用定数バッファに無理に混ぜない事で、他の描画への影響を減らす
+		KdShaderManager::Instance().SetPSConstantBuffer(4, m_cb4_Distortion.GetAddress());
+	}
+
+	if (m_dirtyCBDistortion)
+	{
+		// DrawDistortion の直前にオブジェクトごとのパラメータが更新されるため、
+		// ここで GPU へ転送して最新状態を使う
+		m_cb4_Distortion.Write();
+	}
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+// 歪み用オブジェクトの描画終了
+// 現状は Begin 時の設定だけで足りるため、終了処理は不要
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
+void KdStandardShader::EndDistortion()
+{
+}
+
+// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 // 影を生み出すオブジェクトの情報描画（光を遮る物体）
 // ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
 // シェーダーのパイプライン変更
@@ -178,6 +221,11 @@ void KdStandardShader::DrawModel(const KdModelData& rModel, const Math::Matrix& 
 		m_cb0_Obj.Write();
 	}
 
+	if (m_dirtyCBDistortion)
+	{
+		m_cb4_Distortion.Write();
+	}
+
 	auto& dataNodes = rModel.GetOriginalNodes();
 
 	// 全描画用メッシュノードを描画
@@ -189,7 +237,7 @@ void KdStandardShader::DrawModel(const KdModelData& rModel, const Math::Matrix& 
 	}
 
 	// 定数に変更があった場合は自動的に初期状態に戻す
-	if(m_dirtyCBObj)
+	if (m_dirtyCBObj || m_dirtyCBDistortion)
 	{
 		ResetCBObject();
 	}
@@ -220,6 +268,11 @@ void KdStandardShader::DrawModel(KdModelWork& rModel, const Math::Matrix& mWorld
 	if (m_dirtyCBObj)
 	{
 		m_cb0_Obj.Write();
+	}
+
+	if (m_dirtyCBDistortion)
+	{
+		m_cb4_Distortion.Write();
 	}
 
 	auto& workNodes = rModel.GetNodes();
@@ -253,7 +306,7 @@ void KdStandardShader::DrawModel(KdModelWork& rModel, const Math::Matrix& mWorld
 	}
 
 	// 定数に変更があった場合は自動的に初期状態に戻す
-	if (m_dirtyCBObj)
+	if (m_dirtyCBObj || m_dirtyCBDistortion)
 	{
 		ResetCBObject();
 	}
@@ -279,6 +332,11 @@ void KdStandardShader::DrawPolygon(const KdPolygon& rPolygon, const Math::Matrix
 	if (m_dirtyCBObj)
 	{
 		m_cb0_Obj.Write();
+	}
+
+	if (m_dirtyCBDistortion)
+	{
+		m_cb4_Distortion.Write();
 	}
 
 	// 3Dワールド行列転送
@@ -335,7 +393,7 @@ void KdStandardShader::DrawPolygon(const KdPolygon& rPolygon, const Math::Matrix
 	KdShaderManager::Instance().UndoRasterizerState();
 
 	// 定数に変更があった場合は自動的に初期状態に戻す
-	if (m_dirtyCBObj)
+	if (m_dirtyCBObj || m_dirtyCBDistortion)
 	{
 		ResetCBObject();
 	}
@@ -351,6 +409,11 @@ void KdStandardShader::DrawVertices(const std::vector<KdPolygon::Vertex>& vertic
 	if (m_dirtyCBObj)
 	{
 		m_cb0_Obj.Write();
+	}
+
+	if (m_dirtyCBDistortion)
+	{
+		m_cb4_Distortion.Write();
 	}
 
 	// 3Dワールド行列転送
@@ -388,7 +451,7 @@ void KdStandardShader::DrawVertices(const std::vector<KdPolygon::Vertex>& vertic
 
 	KdShaderManager::Instance().UndoRasterizerState();
 	// 定数に変更があった場合は自動的に初期状態に戻す
-	if (m_dirtyCBObj)
+	if (m_dirtyCBObj || m_dirtyCBDistortion)
 	{
 		ResetCBObject();
 	}
@@ -496,6 +559,16 @@ bool KdStandardShader::Init()
 			return false;
 		}
 	}
+
+	{
+#include "KdStandardShader_PS_Distortion.shaderInc"
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreatePixelShader(compiledBuffer, sizeof(compiledBuffer), nullptr, &m_PS_Distortion))) {
+			assert(0 && "ピクセルシェーダー作成失敗");
+			Release();
+			return false;
+		}
+	}
 	//-------------------------------------
 	// 定数バッファ作成
 	//-------------------------------------
@@ -503,6 +576,8 @@ bool KdStandardShader::Init()
 	m_cb1_Mesh.Create();
 	m_cb2_Material.Create();
 	m_cb3_Bone.Create();
+	// 歪み専用の情報は既存描画と役割が異なるため、専用バッファとして生成する
+	m_cb4_Distortion.Create();
 
 	std::shared_ptr<KdTexture> ds = std::make_shared<KdTexture>();
 	ds->CreateDepthStencil(1024, 1024);
@@ -536,12 +611,14 @@ void KdStandardShader::Release()
 	KdSafeRelease(m_PS_Lit);
 	KdSafeRelease(m_PS_GenDepthFromLight);
 	KdSafeRelease(m_PS_UnLit);
+	KdSafeRelease(m_PS_Distortion);
 
 	m_cb0_Obj.Release();
 	m_cb1_Mesh.Release();
 	m_cb2_Material.Release();
 	// スキンメッシュ対応
 	m_cb3_Bone.Release();
+	m_cb4_Distortion.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -603,8 +680,13 @@ void KdStandardShader::ConvertNormalsFor2D(std::vector<KdPolygon::Vertex>& targe
 void KdStandardShader::ResetCBObject()
 {
 	m_cb0_Obj.Work() = cbObject();
-
 	m_cb0_Obj.Write();
 
 	m_dirtyCBObj = false;
+
+	// 歪み描画が終わった後は、次のオブジェクトへ値を引きずらないよう初期値へ戻す
+	m_cb4_Distortion.Work() = cbDistortion();
+	m_cb4_Distortion.Write();
+
+	m_dirtyCBDistortion = false;
 }

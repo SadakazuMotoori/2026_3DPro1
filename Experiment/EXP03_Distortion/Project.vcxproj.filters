@@ -112,6 +112,12 @@
     <Filter Include="Src\Application\GameObject\Camera\CCTVCamera">
       <UniqueIdentifier>{fa44ec34-d6e1-4c24-aeee-7e47c1e39951}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Src\Application\GameObject\Effect">
+      <UniqueIdentifier>{1f04976d-d3b2-4d91-9756-c9a1eaf7f44f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Src\Application\GameObject\Effect\DistortionObject">
+      <UniqueIdentifier>{95a57d2b-2648-43da-a3fb-2418acfd2b0b}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\Pch.h">
@@ -309,6 +315,9 @@
     <ClInclude Include="Src\Application\GameObject\Character\Enemy\EnemyBase.h">
       <Filter>Src\Application\GameObject\Character\Enemy</Filter>
     </ClInclude>
+    <ClInclude Include="Src\Application\GameObject\Effect\DistortionObject\DistortionObject.h">
+      <Filter>Src\Application\GameObject\Effect\DistortionObject</Filter>
+    </ClInclude>
     <ClInclude Include="Src\Application\GameObject\Camera\CameraBase.h">
       <Filter>Src\Application\GameObject\Camera</Filter>
     </ClInclude>
@@ -488,6 +497,9 @@
     <ClCompile Include="Src\Application\GameObject\Character\Enemy\EnemyBase.cpp">
       <Filter>Src\Application\GameObject\Character\Enemy</Filter>
     </ClCompile>
+    <ClCompile Include="Src\Application\GameObject\Effect\DistortionObject\DistortionObject.cpp">
+      <Filter>Src\Application\GameObject\Effect\DistortionObject</Filter>
+    </ClCompile>
     <ClCompile Include="Src\Application\GameObject\Camera\CameraBase.cpp">
       <Filter>Src\Application\GameObject\Camera</Filter>
     </ClCompile>
@@ -534,7 +546,13 @@
     <FxCompile Include="Src\Framework\Shader\PostProcessShader\KdPostProcessShader_PS_Bright.hlsl">
       <Filter>Src\Framework\Shader\PostProcessShader</Filter>
     </FxCompile>
+    <FxCompile Include="Src\Framework\Shader\PostProcessShader\KdPostProcessShader_PS_Distortion.hlsl">
+      <Filter>Src\Framework\Shader\PostProcessShader</Filter>
+    </FxCompile>
     <FxCompile Include="Src\Framework\Shader\StandardShader\KdStandardShader_PS_GenDepthMapFromLight.hlsl">
+      <Filter>Src\Framework\Shader\StandardShader</Filter>
+    </FxCompile>
+    <FxCompile Include="Src\Framework\Shader\StandardShader\KdStandardShader_PS_Distortion.hlsl">
       <Filter>Src\Framework\Shader\StandardShader</Filter>
     </FxCompile>
     <FxCompile Include="Src\Framework\Shader\StandardShader\KdStandardShader_PS_Lit.hlsl">

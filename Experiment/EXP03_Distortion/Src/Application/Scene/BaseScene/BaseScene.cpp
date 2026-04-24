@@ -102,6 +102,24 @@ void BaseScene::Draw()
 	KdShaderManager::Instance().m_StandardShader.EndUnLit();
 
 	// ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+	// 背景歪み用オブジェクトは専用RTへ描き、最終合成時にだけ背景を曲げる
+	// UI はこの後に描くので歪ませずに済む
+	// 処理の流れとしては、
+	// 1. Distortion 用RTへ「歪み量」だけを描く
+	// 2. PostProcessShader の最終合成で背景テクスチャの UV をずらす
+	// 3. その後に Sprite を描くので、UI は歪みの影響を受けない
+	KdShaderManager::Instance().m_postProcessShader.BeginDistortion();
+	KdShaderManager::Instance().m_StandardShader.BeginDistortion();
+	{
+		for (auto& obj : m_objList)
+		{
+			obj->DrawDistortion();
+		}
+	}
+	KdShaderManager::Instance().m_StandardShader.EndDistortion();
+	KdShaderManager::Instance().m_postProcessShader.EndDistortion();
+
+	// ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
 	// 光源オブジェクト(自ら光るオブジェクトやエフェクト)はBeginとEndの間にまとめてDrawする
 	KdShaderManager::Instance().m_postProcessShader.BeginBright();
 	{

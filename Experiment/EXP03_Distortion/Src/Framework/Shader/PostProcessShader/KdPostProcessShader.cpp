@@ -71,6 +71,19 @@ bool KdPostProcessShader::Init()
 		}
 	}
 
+	{
+#include "KdPostProcessShader_PS_Distortion.shaderInc"
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreatePixelShader(
+			compiledBuffer, sizeof(compiledBuffer), nullptr, &m_PS_Distortion)))
+		{
+			assert(0 && "ピクセルシェーダー作成失敗");
+			Release();
+
+			return false;
+		}
+	}
+
 	m_cb0_BlurInfo.Create();
 
 	m_cb0_DoFInfo.Create();
@@ -88,6 +101,10 @@ bool KdPostProcessShader::Init()
 
 	// 被写界深度画像
 	m_depthOfFieldRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
+
+	// 歪み情報を蓄積する RT
+	// RG に UV ずらし量、A に歪みの適用率を入れるため float フォーマットを使う
+	m_distortionRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight(), false, DXGI_FORMAT_R16G16B16A16_FLOAT);
 	
 	m_brightEffectRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
 
@@ -126,6 +143,7 @@ void KdPostProcessShader::Release()
 	KdSafeRelease(m_PS_Blur);
 	KdSafeRelease(m_PS_DoF);
 	KdSafeRelease(m_PS_Bright);
+	KdSafeRelease(m_PS_Distortion);
 
 	m_cb0_BlurInfo.Release();
 	m_cb0_DoFInfo.Release();
@@ -133,7 +151,10 @@ void KdPostProcessShader::Release()
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-// 
+// ポストエフェクト描画の開始
+// ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+// シーンカラーRT、明度RT、歪みRT を毎フレーム初期化し、
+// 以降の 3D 描画がポストエフェクト用 RT へ入る状態を作る
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 void KdPostProcessShader::Draw()
 {
@@ -142,6 +163,10 @@ void KdPostProcessShader::Draw()
 
 	// 光源描画テクスチャの描画クリア
 	m_brightEffectRTPack.ClearTexture(kBlackColor);
+
+	// 歪み情報テクスチャの描画クリア
+	// 初期値は「歪みなし」にしたいので、必ず 0 クリアしておく
+	m_distortionRTPack.ClearTexture(Math::Color(0, 0, 0, 0));
 
 	// レンダーターゲット変更
 	if (!m_postEffectRTChanger.ChangeRenderTarget(m_postEffectRTPack))
@@ -152,7 +177,9 @@ void KdPostProcessShader::Draw()
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
-// 
+// 明度抽出用オブジェクトの描画開始
+// ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== ===== =====
+// Bloom で使う高輝度成分を別RTへ足し込む
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
 void KdPostProcessShader::BeginBright()
 {
@@ -175,15 +202,42 @@ void KdPostProcessShader::EndBright()
 	m_brightRTChanger.UndoRenderTarget();
 }
 
+void KdPostProcessShader::BeginDistortion()
+{
+	if (!m_distortionRTChanger.ChangeRenderTarget(m_distortionRTPack.m_RTTexture, m_postEffectRTPack.m_ZBuffer, &m_distortionRTPack.m_viewPort))
+	{
+		m_distortionRTChanger.UndoRenderTarget();
+	}
+
+	// 複数の歪みオブジェクトを重ねて使えるよう、ベクトルは加算合成にしておく
+	// これにより、熱気の揺らぎと衝撃波が同じ場所に重なっても両方効く
+	KdShaderManager::Instance().ChangeBlendState(KdBlendState::Add);
+
+	// 既存シーンの深度には従うが、歪み用の描画で深度は更新しない
+	// すでに描かれた手前の物体に隠れる必要はあるが、
+	// 歪み板ポリ自身が深度を書いて後続描画を邪魔しないようにする
+	KdShaderManager::Instance().ChangeDepthStencilState(KdDepthStencilState::ZWriteDisable);
+}
+
+void KdPostProcessShader::EndDistortion()
+{
+	KdShaderManager::Instance().UndoDepthStencilState();
+
+	KdShaderManager::Instance().UndoBlendState();
+
+	m_distortionRTChanger.UndoRenderTarget();
+}
+
 void KdPostProcessShader::PostEffectProcess()
 {
 	m_postEffectRTChanger.UndoRenderTarget();
 
+	// 合成順は「Bloom -> Blur/DoF -> Distortion」としている
+	// Distortion を最後に回す事で、背景の最終画像そのものを曲げられる
 	LightBloomProcess();
 	BlurProcess();
 	DepthOfFieldProcess();
-
-	KdShaderManager::Instance().m_spriteShader.DrawTex(m_depthOfFieldRTPack.m_RTTexture.get(), 0, 0);
+	DistortionProcess();
 }
 
 void KdPostProcessShader::LightBloomProcess()
@@ -251,6 +305,26 @@ void KdPostProcessShader::DepthOfFieldProcess()
 	};
 
 	DrawTexture(srcTexList, 4, m_depthOfFieldRTPack.m_RTTexture, &m_depthOfFieldRTPack.m_viewPort);
+}
+
+void KdPostProcessShader::DistortionProcess()
+{
+	// 被写界深度まで終わった最終画像に対して、歪み RT のベクトルを適用する
+	// ここで初めて「実際に背景が曲がる」
+	SetDistortionToDevice();
+
+	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Linear_Clamp);
+
+	std::shared_ptr<KdTexture> srcTexList[2] =
+	{
+		m_depthOfFieldRTPack.m_RTTexture,
+		// t1 には歪み情報そのものを渡し、PS側で UV オフセットとして解釈する
+		m_distortionRTPack.m_RTTexture
+	};
+
+	DrawTexture(srcTexList, 2, nullptr, nullptr);
+
+	KdShaderManager::Instance().UndoSamplerState();
 }
 
 void KdPostProcessShader::CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingRadius, const Math::Vector2& dir)
@@ -437,4 +511,21 @@ void KdPostProcessShader::SetBrightToDevice()
 	}
 
 	shaderMgr.SetPixelShader(m_PS_Bright);
+}
+
+void KdPostProcessShader::SetDistortionToDevice()
+{
+	ID3D11DeviceContext* DevCon = KdDirect3D::Instance().WorkDevContext();
+	if (!DevCon) { return; }
+
+	KdShaderManager& shaderMgr = KdShaderManager::Instance();
+
+	if (shaderMgr.SetVertexShader(m_VS))
+	{
+		// 画面全体クアッドを描くため、ポストプロセス共通のレイアウトを使う
+		DevCon->IASetInputLayout(m_inputLayout);
+	}
+
+	// ピクセルシェーダーだけを歪み合成用へ切り替える
+	shaderMgr.SetPixelShader(m_PS_Distortion);
 }

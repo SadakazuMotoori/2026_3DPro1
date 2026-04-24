@@ -280,6 +280,7 @@
     <ClInclude Include="Src\Application\GameObject\Character\CharacterBase.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Enemy\Enemy01\Enemy01.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Enemy\EnemyBase.h" />
+    <ClInclude Include="Src\Application\GameObject\Effect\DistortionObject\DistortionObject.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Player\PlayerBase.h" />
     <ClInclude Include="Src\Application\GameObject\Character\Player\SkinmeshMan\SkinmeshMan.h" />
     <ClInclude Include="Src\Application\GameObject\Map\MapBase.h" />
@@ -344,6 +345,7 @@
     <ClCompile Include="Src\Application\GameObject\Character\CharacterBase.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Enemy\Enemy01\Enemy01.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Enemy\EnemyBase.cpp" />
+    <ClCompile Include="Src\Application\GameObject\Effect\DistortionObject\DistortionObject.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Player\PlayerBase.cpp" />
     <ClCompile Include="Src\Application\GameObject\Character\Player\SkinmeshMan\SkinmeshMan.cpp" />
     <ClCompile Include="Src\Application\GameObject\Map\MapBase.cpp" />
@@ -416,6 +418,12 @@
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
     </FxCompile>
+    <FxCompile Include="Src\Framework\Shader\PostProcessShader\KdPostProcessShader_PS_Distortion.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+    </FxCompile>
     <FxCompile Include="Src\Framework\Shader\PostProcessShader\KdPostProcessShader_PS_DoF.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
@@ -441,6 +449,12 @@
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
     </FxCompile>
     <FxCompile Include="Src\Framework\Shader\StandardShader\KdStandardShader_PS_GenDepthMapFromLight.hlsl">
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
+      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
+    </FxCompile>
+    <FxCompile Include="Src\Framework\Shader\StandardShader\KdStandardShader_PS_Distortion.hlsl">
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
       <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">Pixel</ShaderType>
