@@ -71,11 +71,28 @@ bool KdPostProcessShader::Init()
 		}
 	}
 
+	{
+		// LightShaft専用のピクセルシェーダーを作成する。
+#include "KdPostProcessShader_PS_LightShaft.shaderInc"
+
+		if (FAILED(KdDirect3D::Instance().WorkDev()->CreatePixelShader(
+			compiledBuffer, sizeof(compiledBuffer), nullptr, &m_PS_LightShaft)))
+		{
+			assert(0 && "ピクセルシェーダー作成失敗");
+			Release();
+
+			return false;
+		}
+	}
+
 	m_cb0_BlurInfo.Create();
 
 	m_cb0_DoFInfo.Create();
 
 	m_cb0_BrightInfo.Create();
+
+	// LightShaftの色や強さなどをGPUへ送るための定数バッファを作成する。
+	m_cb0_LightShaftInfo.Create();
 
 	const std::shared_ptr<KdTexture>& backBuffer = KdDirect3D::Instance().GetBackBuffer();
 	
@@ -90,6 +107,9 @@ bool KdPostProcessShader::Init()
 	m_depthOfFieldRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
 	
 	m_brightEffectRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
+
+	// LightShaftの計算結果を一度ここに描き、後段のDoF合成で使用する。
+	m_lightShaftRTPack.CreateRenderTarget(backBuffer->GetWidth(), backBuffer->GetHeight());
 
 	int lightBloomWidth = m_brightEffectRTPack.m_RTTexture->GetWidth();
 	int lightBloomHeight = m_brightEffectRTPack.m_RTTexture->GetHeight();
@@ -126,10 +146,14 @@ void KdPostProcessShader::Release()
 	KdSafeRelease(m_PS_Blur);
 	KdSafeRelease(m_PS_DoF);
 	KdSafeRelease(m_PS_Bright);
+	// LightShaft用ピクセルシェーダーを解放する。
+	KdSafeRelease(m_PS_LightShaft);
 
 	m_cb0_BlurInfo.Release();
 	m_cb0_DoFInfo.Release();
 	m_cb0_BrightInfo.Release();
+	// LightShaft用定数バッファを解放する。
+	m_cb0_LightShaftInfo.Release();
 }
 
 // ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// ///// /////
@@ -180,6 +204,8 @@ void KdPostProcessShader::PostEffectProcess()
 	m_postEffectRTChanger.UndoRenderTarget();
 
 	LightBloomProcess();
+	// 深度画像からLightShaftの中間画像を作る。
+	LightShaftProcess();
 	BlurProcess();
 	DepthOfFieldProcess();
 
@@ -242,15 +268,34 @@ void KdPostProcessShader::DepthOfFieldProcess()
 {
 	SetDoFToDevice();
 
-	std::shared_ptr<KdTexture> srcTexList[4] =
+	std::shared_ptr<KdTexture> srcTexList[5] =
 	{
-		m_postEffectRTPack.m_RTTexture,
-		m_blurRTPack.m_RTTexture,
-		m_strongBlurRTPack.m_RTTexture,
-		m_postEffectRTPack.m_ZBuffer
+		m_postEffectRTPack.m_RTTexture,		// t0: 通常のシーン画像。
+		m_blurRTPack.m_RTTexture,			// t1: 少しぼかした画像。
+		m_strongBlurRTPack.m_RTTexture,		// t2: 強くぼかした画像。
+		m_postEffectRTPack.m_ZBuffer,		// t3: ピクセルの奥行きを調べる深度画像。
+		m_lightShaftRTPack.m_RTTexture		// t4: LightShaftProcessで作った光の筋画像。
 	};
 
-	DrawTexture(srcTexList, 4, m_depthOfFieldRTPack.m_RTTexture, &m_depthOfFieldRTPack.m_viewPort);
+	// DoFシェーダー内で、ぼかしとLightShaftをまとめて最終画像に合成する。
+	DrawTexture(srcTexList, 5, m_depthOfFieldRTPack.m_RTTexture, &m_depthOfFieldRTPack.m_viewPort);
+}
+
+void KdPostProcessShader::LightShaftProcess()
+{
+	// 以降のDrawTextureでLightShaft用シェーダーが使われるようにする。
+	SetLightShaftToDevice();
+
+	// 深度画像を境界として使うため、ぼかさずにそのままサンプリングする。
+	KdShaderManager::Instance().ChangeSamplerState(KdSamplerState::Point_Clamp);
+
+	// 前フレームのLightShaftが残らないように、描き込み先を初期化する。
+	m_lightShaftRTPack.ClearTexture(kBlueColor);
+
+	// t0に深度画像を渡し、LightShaftだけの画像をm_lightShaftRTPackへ描く。
+	DrawTexture(&m_postEffectRTPack.m_ZBuffer, 1, m_lightShaftRTPack.m_RTTexture, &m_lightShaftRTPack.m_viewPort);
+
+	KdShaderManager::Instance().UndoSamplerState();
 }
 
 void KdPostProcessShader::CreateBlurOffsetList(std::vector<Math::Vector3>& dstInfo, const std::shared_ptr<KdTexture>& spSrcTex, int samplingRadius, const Math::Vector2& dir)
@@ -437,4 +482,27 @@ void KdPostProcessShader::SetBrightToDevice()
 	}
 
 	shaderMgr.SetPixelShader(m_PS_Bright);
+}
+
+void KdPostProcessShader::SetLightShaftToDevice()
+{
+	ID3D11DeviceContext* DevCon = KdDirect3D::Instance().WorkDevContext();
+	if (!DevCon) { return; }
+
+	// CPU側で持っているLightShaft設定値をGPU側へ転送する。
+	m_cb0_LightShaftInfo.Write();
+
+	// LightShaftシェーダーのregister(b0)に定数バッファを接続する。
+	KdDirect3D::Instance().WorkDevContext()->PSSetConstantBuffers(0, 1, m_cb0_LightShaftInfo.GetAddress());
+
+	KdShaderManager& shaderMgr = KdShaderManager::Instance();
+
+	// 画面全体を覆う四角形を描くための頂点シェーダーと入力レイアウトを使う。
+	if (shaderMgr.SetVertexShader(m_VS))
+	{
+		DevCon->IASetInputLayout(m_inputLayout);
+	}
+
+	// ピクセルごとにLightShaftの強さを計算するシェーダーを使う。
+	shaderMgr.SetPixelShader(m_PS_LightShaft);
 }
